@@ -1,0 +1,960 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Key Manager</title>
+<style>
+/* Tokens, components and motion follow the CLIProxyAPI management panel (as in the Usage plugin page), so the
+   page sits in it natively. The theme mirrors the panel's <html data-theme>: none = warm light, "dark", "white". */
+:root {
+  --bg-secondary: #faf9f5; --bg-primary: #f0eee8; --bg-tertiary: #e9e6df; --bg-hover: var(--bg-tertiary);
+  --floating-surface: #fffdf9; --floating-shadow: 0 12px 26px #00000024;
+  --text-primary: #2d2a26; --text-secondary: #6d6760; --text-tertiary: #a29c95; --text-quaternary: #c0bab3;
+  --border-color: #e3e1db; --border-primary: #d5d2cb; --border-hover: #cecac4;
+  --primary-color: #8b8680; --primary-active: #726d67; --amber-color: #d97706;
+  --success-badge-bg: #d1fae5; --success-badge-text: #065f46; --success-badge-border: #6ee7b7;
+  --failure-badge-bg: #c6574624; --failure-badge-text: #8a3a30; --failure-badge-border: #c6574659;
+  --shadow: 0 1px 2px 0 #00000014; --shadow-lg: 0 10px 18px -3px #0000001a;
+  --glass-bg: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  --glass-border: color-mix(in srgb, var(--border-color) 60%, transparent);
+  --viz-success: #10b981; --viz-failure: #c65746; --viz-requests: #64748b;
+  --ease-out-strong: cubic-bezier(.23, 1, .32, 1); --dur-press: .16s; --dur-hover: .2s;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+[data-theme=dark] {
+  --bg-secondary: #151412; --bg-primary: #1d1b18; --bg-tertiary: #262320; --bg-hover: #2e2a26;
+  --floating-surface: #2a2723; --floating-shadow: 0 14px 30px #0006;
+  --text-primary: #f6f4f1; --text-secondary: #c9c3bb; --text-tertiary: #9c958d; --text-quaternary: #6f6962;
+  --border-color: #3a3530; --border-primary: #4a453f; --border-hover: #5a544d;
+  --primary-active: #a6a099; --amber-color: #f59e0b;
+  --success-badge-bg: #064e3b4d; --success-badge-text: #6ee7b7; --success-badge-border: #059669;
+  --failure-badge-bg: #c657463d; --failure-badge-text: #f1b0a6; --failure-badge-border: #c6574680;
+  --shadow: 0 1px 3px 0 #0000004d; --shadow-lg: 0 10px 15px -3px #0000004d;
+  --glass-border: color-mix(in srgb, var(--border-color) 55%, transparent);
+  --viz-success: #0fae78; --viz-failure: #cf4b3a; --viz-requests: #94a3b8;
+  color-scheme: dark;
+}
+[data-theme=white] {
+  --bg-secondary: #fff; --bg-primary: #fff; --bg-tertiary: #f6f6f6; --floating-surface: #fff; --floating-shadow: 0 12px 26px #0000001f;
+  --border-color: #e5e5e5; --border-primary: #d9d9d9; --border-hover: #ccc;
+}
+
+*, ::before, ::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+h1, h2, h3, p { margin: 0; }
+body { min-height: 100vh; background: var(--bg-secondary); color: var(--text-primary); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; transition: background-color .3s, color .3s; }
+body.modal-open { overflow: hidden; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+svg.i { display: inline-block; flex-shrink: 0; fill: currentColor; vertical-align: middle; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-tertiary); }
+.r { text-align: right; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ambient wash + grid behind the masthead (core dashboard) */
+.ambient { position: absolute; top: 0; left: 0; right: 0; z-index: 0; height: 520px; overflow: hidden; pointer-events: none; }
+.washTop { position: absolute; top: 0; left: 50%; width: min(960px, 96vw); height: 440px; transform: translateX(-50%); background: radial-gradient(ellipse 75% 70% at 50% 18%, color-mix(in srgb, var(--viz-success) 10%, transparent), transparent 70%); -webkit-mask-image: linear-gradient(#0000, #000 26% 62%, #0000); mask-image: linear-gradient(#0000, #000 26% 62%, #0000); }
+.gridWash { position: absolute; inset: 0; opacity: .24; background-image: linear-gradient(to right, var(--border-color) 1px, transparent 1px), linear-gradient(to bottom, var(--border-color) 1px, transparent 1px); background-size: 72px 72px;
+  -webkit-mask-image: linear-gradient(#0000, #000 48px), radial-gradient(70% 60% at 50% 0, #000 0%, #0000 78%); -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(#0000, #000 48px), radial-gradient(70% 60% at 50% 0, #000 0%, #0000 78%); mask-composite: intersect; }
+
+.page { position: relative; z-index: 1; width: 100%; max-width: 1120px; margin: 0 auto; padding: 40px 24px 80px; }
+.embedded .page { padding-top: 88px; } /* clear the panel's floating toolbar */
+.content { display: flex; flex-direction: column; gap: clamp(36px, 5vh, 56px); min-width: 0; }
+
+/* masthead */
+.hero { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 20px 32px; }
+.heroCopy { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; min-width: 0; }
+.eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--text-tertiary); font: 700 11px/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.eyebrow::before { content: "▍"; color: var(--viz-success); font-size: 12px; line-height: 1; }
+.heroTitle { color: var(--text-primary); font-size: clamp(32px, 4.2vw, 50px); font-weight: 700; line-height: 1.05; letter-spacing: -.035em; text-wrap: balance; }
+.heroPeriod { margin-inline-start: clamp(3px, .06em, 6px); color: var(--viz-success); }
+.heroMeta { color: var(--text-secondary); font: 13px/1.5 var(--mono); letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+.heroActions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* segmented control (ModeSwitch) */
+.segmented { display: inline-flex; flex-shrink: 0; align-items: center; gap: 2px; max-width: 100%; padding: 2px; overflow-x: auto; border: 1px solid var(--border-color); border-radius: 9999px; background: var(--bg-tertiary); scrollbar-width: none; }
+.segmented::-webkit-scrollbar { display: none; }
+.segment { padding: 5px 12px; border: 0; border-radius: 9999px; background: none; color: var(--text-secondary); font-size: 12px; font-weight: 550; line-height: 1.3; white-space: nowrap;
+  transition: color var(--dur-hover) var(--ease-out-strong), background-color var(--dur-hover) var(--ease-out-strong), box-shadow var(--dur-hover) var(--ease-out-strong), transform var(--dur-press) var(--ease-out-strong); }
+.segment:hover:not(.on) { color: var(--text-primary); }
+.segment:active { transform: scale(.96); }
+.segment.on { background: var(--floating-surface); color: var(--text-primary); font-weight: 650; box-shadow: 0 1px 3px #0000001f, 0 1px 2px #00000014; }
+.segment:focus-visible, .btn:focus-visible, .iconBtn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+
+/* stat tiles + meter */
+.statsRow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.statTile { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 22px 24px; border: 1px solid var(--border-color); border-radius: 14px; background: color-mix(in srgb, var(--bg-primary) 82%, transparent); transition: border-color .15s; }
+.statTile::before { content: ""; width: 28px; height: 3px; margin-bottom: 2px; border-radius: 9999px; background: var(--tile-accent, var(--border-hover)); }
+.statTile:hover { border-color: var(--border-hover); }
+.statLabel { color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.statValue { overflow: hidden; color: var(--text-primary); font: 600 28px/1.1 var(--mono); letter-spacing: -.01em; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.statHint { color: var(--text-tertiary); font-size: 12px; line-height: 1.45; }
+.meter { width: 100%; height: 6px; margin: 4px 0 2px; overflow: hidden; border-radius: 9999px; background: color-mix(in srgb, var(--meter-fill) 16%, transparent); }
+.meter > i { display: block; height: 100%; border-radius: 9999px; background: var(--meter-fill); transition: width .36s var(--ease-out-strong); }
+
+/* sections */
+.section { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.sectionHead { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 14px 24px; }
+.sectionCopy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sectionTitle { font-size: clamp(22px, 2.6vw, 30px); font-weight: 650; line-height: 1.18; letter-spacing: -.02em; text-wrap: balance; }
+.sectionDescription { max-width: 72ch; color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+.panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding: clamp(20px, 2.2vw, 26px); border: 1px solid var(--border-color); border-radius: 16px; background: color-mix(in srgb, var(--bg-primary) 82%, transparent); }
+.subTitle { color: var(--text-primary); font-size: 14px; font-weight: 650; }
+.chartEmpty { display: grid; place-items: center; border: 1px dashed var(--border-primary); border-radius: 12px; background: color-mix(in srgb, var(--bg-secondary) 60%, transparent); color: var(--text-tertiary); font-size: 13px; }
+
+/* badges */
+.pill { display: inline-flex; align-items: center; padding: 1px 8px; border: 1px solid var(--success-badge-border); border-radius: 9999px; background: var(--success-badge-bg); color: var(--success-badge-text); font: 700 10.5px/1.6 var(--mono); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.pill.bad { border-color: var(--failure-badge-border); background: var(--failure-badge-bg); color: var(--failure-badge-text); }
+.pill.warn { border-color: color-mix(in srgb, var(--amber-color) 45%, transparent); background: color-mix(in srgb, var(--amber-color) 12%, transparent); color: var(--amber-color); }
+.pill.muted { border-color: var(--border-color); background: transparent; color: var(--text-tertiary); }
+
+/* buttons (core primaryAction / ghostAction / danger) + inputs */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 16px; border: 1px solid var(--border-color); border-radius: 9999px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; font-weight: 600; white-space: nowrap; text-decoration: none;
+  transition: transform var(--dur-press) var(--ease-out-strong), background-color .15s, border-color .15s, box-shadow var(--dur-hover) var(--ease-out-strong), color .15s; }
+.btn:hover:not(:disabled) { border-color: var(--border-hover); background: var(--bg-tertiary); }
+.btn:active:not(:disabled) { transform: scale(.97); }
+.btn:disabled { opacity: .45; }
+.btn.sm { height: 28px; padding: 0 11px; font-size: 12px; }
+.btn.primary { border-color: transparent; background: var(--text-primary); color: var(--bg-secondary); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary)); box-shadow: 0 12px 26px color-mix(in srgb, var(--text-primary) 22%, transparent); }
+.btn.ghost { border-color: transparent; background: none; color: var(--text-secondary); }
+.btn.ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent); color: var(--text-primary); }
+.btn.danger { border-color: #c65746; background: #c65746; color: #fff; }
+.btn.danger:hover:not(:disabled) { border-color: #b94a39; background: #b94a39; }
+.btn.ghost.dangerText { color: var(--failure-badge-text); }
+.iconBtn { display: inline-grid; width: 26px; height: 26px; flex: none; padding: 0; place-items: center; border: 0; border-radius: 7px; background: none; color: var(--text-tertiary); transition: background-color .15s, color .15s; }
+.iconBtn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field > label { color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.hint { color: var(--text-secondary); font-size: 12.5px; line-height: 1.5; }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row > .input { flex: 1 1 auto; }
+.input { width: 100%; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); box-shadow: var(--shadow); color: var(--text-primary); font-size: 13px; font-weight: 500; transition: border-color .15s, box-shadow .15s; }
+.input:hover { border-color: var(--border-hover); }
+.input:focus { outline: none; border-color: var(--primary-color); box-shadow: var(--shadow), 0 0 0 3px #8b86802e; }
+.input[readonly] { background: var(--bg-tertiary); }
+.input.mono { font: 500 12.5px var(--mono); }
+select.input { width: auto; padding-right: 34px; appearance: none; cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8680' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; }
+.formError { padding: 9px 12px; border: 1px solid var(--failure-badge-border); border-radius: 8px; background: var(--failure-badge-bg); color: var(--failure-badge-text); font-size: 13px; }
+.usageNote { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 13px; }
+.usageNote b { color: var(--text-primary); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* tables (core Table) */
+.tableWrap { overflow: hidden; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-primary); }
+.xscroll { overflow-x: auto; }
+.table { width: 100%; border-collapse: separate; border-spacing: 0; color: var(--text-primary); font-size: 13px; }
+.table thead th { padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); font-size: 12px; font-weight: 500; text-align: left; white-space: nowrap; }
+.table thead th.r { text-align: right; }
+.table td { padding: 11px 14px; border-bottom: 1px solid var(--border-color); vertical-align: middle; white-space: nowrap; }
+.table tbody tr:last-child td { border-bottom: 0; }
+.table tbody tr td { transition: background-color .15s; }
+.table tbody tr.click { cursor: pointer; }
+.table tbody tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); }
+.table td.soft { color: var(--text-secondary); }
+.table td.empty { padding: 36px 14px; color: var(--text-tertiary); text-align: center; white-space: normal; }
+.keyCell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.keyCell b { overflow: hidden; max-width: 260px; font-weight: 650; text-overflow: ellipsis; }
+.keyCell b.unnamed { color: var(--text-tertiary); font-weight: 500; font-style: italic; }
+.keyLine { display: flex; align-items: center; gap: 2px; color: var(--text-tertiary); font: 11.5px/1.4 var(--mono); }
+.sub { display: block; color: var(--text-tertiary); font-size: 11.5px; }
+.usageCell { display: flex; min-width: 150px; flex-direction: column; gap: 2px; }
+.usageCell .meter { margin: 2px 0 0; }
+.actions { display: flex; justify-content: flex-end; gap: 2px; }
+
+/* daily bars */
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 140px; padding-top: 6px; border-bottom: 1px solid var(--border-primary); }
+.barCol { display: flex; flex: 1 1 0; align-items: flex-end; height: 100%; min-width: 0; border-radius: 4px 4px 0 0; transition: background-color .12s; }
+.barCol:hover { background: color-mix(in srgb, var(--bg-tertiary) 70%, transparent); }
+.bar { display: block; width: 100%; border-radius: 4px 4px 0 0; background: var(--viz-success); transform-origin: 50% 100%; }
+.barCol:hover .bar { filter: brightness(1.08) saturate(1.15); }
+.animate .bar { animation: barGrow .42s cubic-bezier(.4, 0, .2, 1) both; animation-delay: var(--d, 0s); }
+@keyframes barGrow { from { transform: scaleY(0); } }
+.barAxis { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* sheet (core Sheet) */
+.sheetOverlay { position: fixed; inset: 0; z-index: 2000; display: flex; justify-content: flex-end; background: #00000073; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); animation: fadeIn .28s cubic-bezier(.16, 1, .3, 1) both; }
+.sheet { position: relative; display: flex; width: min(680px, 100vw); height: 100%; flex-direction: column; border-left: 1px solid var(--border-color); background: var(--bg-primary); box-shadow: -8px 0 32px #00000029, var(--floating-shadow); outline: none; animation: sheetSlideIn .32s cubic-bezier(.16, 1, .3, 1) both; }
+.sheetOverlay.closing { animation: fadeOut .28s cubic-bezier(.4, 0, .2, 1) both; }
+.sheetOverlay.closing .sheet { animation: sheetSlideOut .28s cubic-bezier(.32, 0, .67, 0) both; }
+@keyframes fadeIn { from { opacity: 0; } }
+@keyframes fadeOut { to { opacity: 0; } }
+@keyframes sheetSlideIn { from { transform: translateX(100%); } }
+@keyframes sheetSlideOut { to { transform: translateX(100%); } }
+.sheetHead { display: flex; flex-direction: column; gap: 4px; padding: 20px 56px 20px 24px; border-bottom: 1px solid var(--border-color); }
+.sheetEyebrow { color: var(--text-secondary); font-size: 11px; font-weight: 500; letter-spacing: .05em; text-transform: uppercase; }
+.sheetTitle { font-size: 18px; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.sheetDesc { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-secondary); font: 12.5px var(--mono); }
+.sheetBody { display: flex; flex: 1; flex-direction: column; gap: 22px; padding: 24px; overflow-y: auto; }
+.closeBtn { position: absolute; top: 14px; right: 14px; display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 8px; background: none; color: var(--text-secondary); transition: background-color .15s, color .15s; }
+.closeBtn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.specGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }
+.specRow { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--border-color); }
+.specLabel { flex: none; color: var(--text-secondary); font-size: 13px; }
+.specValue { min-width: 0; color: var(--text-primary); font-size: 13px; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.block { display: flex; flex-direction: column; gap: 10px; }
+/* the panel's floating toolbar covers the top right of this frame */
+.embedded .sheet { padding-top: 76px; }
+.embedded .closeBtn { top: 90px; }
+
+/* modal (core Modal) */
+.modal-overlay { position: fixed; inset: 0; z-index: 2100; display: flex; align-items: center; justify-content: center; padding: 24px; background: #00000059; animation: .25s ease-out forwards fadeIn; }
+.modal-overlay.closing { animation: .3s ease-in forwards fadeOut; }
+.embedded .modal-overlay { padding-top: 88px; }
+.modal { position: relative; display: flex; width: min(540px, 100%); max-width: 100%; max-height: 90vh; flex-direction: column; overflow: hidden; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-primary); box-shadow: 0 10px 15px -3px #0000001a; transform-origin: calc(100% - 28px) 28px; animation: .3s cubic-bezier(.34, 1.56, .64, 1) forwards modalIn; }
+.modal-overlay.closing .modal { animation: .3s cubic-bezier(.4, 0, .2, 1) forwards modalOut; }
+@keyframes modalIn { 0% { opacity: 0; transform: scale(.85) translateY(20px); } to { opacity: 1; transform: none; } }
+@keyframes modalOut { 0% { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0); } }
+.modal-header { display: flex; align-items: center; padding: 16px 52px 16px 24px; border-bottom: 1px solid var(--border-color); }
+.modal-title { color: var(--text-primary); font-size: 18px; font-weight: 700; }
+.modal-body { display: flex; flex-direction: column; gap: 18px; max-height: 65vh; padding: 24px; overflow: auto; color: var(--text-secondary); }
+.modal-body p b { color: var(--text-primary); }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--border-color); background: var(--bg-primary); }
+.modal-close-floating { position: absolute; top: 12px; right: 12px; z-index: 10; display: inline-flex; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border: 1px solid var(--border-color); border-radius: 9999px; background: var(--bg-secondary); color: var(--text-secondary); transition: color .15s, background-color .15s, transform .15s; }
+.modal-close-floating:hover { background: var(--bg-tertiary); color: var(--text-primary); transform: scale(1.1); }
+.modal-close-floating:active { transform: scale(.95); }
+
+/* auth gate + toast */
+.authWrap { display: grid; min-height: 62vh; place-items: center; }
+.auth { width: min(480px, 100%); gap: 14px; padding: 32px; }
+.authTitle { font-size: 26px; font-weight: 650; line-height: 1.2; letter-spacing: -.02em; }
+.toast { position: fixed; right: 16px; bottom: 16px; z-index: 3000; max-width: min(420px, calc(100vw - 32px)); padding: 10px 14px; border: 1px solid var(--glass-border); border-left: 3px solid var(--viz-failure); border-radius: 10px; background: var(--floating-surface); box-shadow: var(--floating-shadow); color: var(--text-primary); font-size: 13px; animation: fadeIn .28s var(--ease-out-strong); }
+.toast.ok { border-left-color: var(--viz-success); }
+
+@media (max-width: 1023px) {
+  .statsRow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .page { padding: 24px 16px 64px; }
+  .embedded .page { padding-top: 76px; }
+  .statsRow, .specGrid { grid-template-columns: minmax(0, 1fr); }
+  .statTile { padding: 18px 20px; }
+  .modal-overlay { padding: 16px; }
+  .modal { max-height: calc(100dvh - 32px); border-radius: 8px; }
+  .modal-body { padding: 16px; }
+  .modal-footer { flex-direction: column-reverse; align-items: stretch; padding: 16px; }
+  .sheetBody { padding: 18px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="ambient" aria-hidden="true"><div class="washTop"></div><div class="gridWash"></div></div>
+<main class="page" id="app"></main>
+<div id="sheet"></div>
+<div id="modal"></div>
+<div id="toast" class="toast" role="status" hidden></div>
+<script>
+"use strict";
+const API = "/v0/management/apikeys";
+const KEYS_API = "/v8/management/config/access/api-keys";
+const KEY_STORE = "apikeys:management-key";
+const SESSION_KEY = "apikeys:session-key";
+const CAPTURE_FLAG = "apikeys:capture-attempted";
+const KEY_NAMES_PREFIX = "api-key-names:v1:";
+const SCOPE_PREFIX = "cli-proxy-api:caller-scope:v1\u0000";
+const POLL_MS = 15000;
+const DAY = 86400000;
+const SOON = 7 * DAY;
+const EMBEDDED = (() => { try { return window.parent !== window; } catch { return true; } })();
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const EXPIRY_PRESETS = [["never", "Never"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["date", "Date"]];
+const UNITS = [[1e9, "B"], [1e6, "M"], [1e3, "K"], [1, "tokens"]];
+const ICONS = {
+  close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  plus: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
+  refresh: "M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
+};
+
+const state = { key: "", keySource: "", cfgKeys: [], entries: {}, now: Date.now(), loaded: false, error: "", panelNames: {} };
+const ui = {}; // element refs filled by build()
+const scopeIds = new Map(); // raw key -> caller scope id
+
+// ---------- theme: follow the panel ----------
+function panelTheme() {
+  try { if (EMBEDDED) return window.parent.document.documentElement.getAttribute("data-theme"); } catch {}
+  let choice = "auto";
+  try {
+    const saved = JSON.parse(deobfuscate(storageGet("cli-proxy-theme")) || "null");
+    choice = (saved && (saved.state ? saved.state.theme : saved.theme)) || choice;
+  } catch {}
+  if (choice === "auto") choice = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "white";
+  return choice === "dark" || choice === "white" ? choice : null;
+}
+function applyTheme() {
+  const theme = panelTheme();
+  theme ? document.documentElement.setAttribute("data-theme", theme) : document.documentElement.removeAttribute("data-theme");
+}
+document.documentElement.classList.toggle("embedded", EMBEDDED);
+applyTheme();
+try { if (EMBEDDED) new MutationObserver(applyTheme).observe(window.parent.document.documentElement, { attributes: true, attributeFilter: ["data-theme"] }); } catch {}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+window.addEventListener("storage", e => {
+  if (e.key === "cli-proxy-theme") applyTheme();
+  if (e.key && e.key.startsWith(KEY_NAMES_PREFIX) && ui.content) { state.panelNames = readPanelNames(state.cfgKeys); render(); }
+});
+
+// ---------- DOM helpers (text always goes through textContent) ----------
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  setAttrs(el, attrs);
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false && c !== "") el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+function s(tag, attrs, ...children) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  setAttrs(el, attrs);
+  for (const c of children.flat(Infinity)) if (c) el.append(c);
+  return el;
+}
+function setAttrs(el, attrs) {
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "value") el.value = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+}
+function icon(name, size = 18) {
+  return s("svg", { class: "i", viewBox: "0 0 24 24", width: size, height: size, "aria-hidden": "true" }, s("path", { d: ICONS[name] }));
+}
+function spinner(size = 16) {
+  return s("svg", { class: "i spin", viewBox: "0 0 24 24", width: size, height: size, "aria-hidden": "true" },
+    s("circle", { cx: 12, cy: 12, r: 9, fill: "none", stroke: "currentColor", "stroke-width": 2.5, "stroke-linecap": "round", "stroke-dasharray": "40 100" }));
+}
+function td(content, cls, attrs) { return h("td", { class: cls, ...attrs }, content); }
+function toast(msg, ok) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.toggle("ok", !!ok); t.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 3500);
+}
+function storageGet(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
+function storageSet(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} }
+function sessionGet(k) { try { return sessionStorage.getItem(k) || ""; } catch { return ""; } }
+function sessionSet(k, v) { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch {} }
+async function copyText(text, what) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch {
+    const area = h("textarea", { readonly: true, style: "position:fixed;top:0;left:0;opacity:0" });
+    area.value = text; document.body.append(area); area.select();
+    try { ok = document.execCommand("copy"); } catch {}
+    area.remove();
+  }
+  toast(ok ? `${what} copied` : "Copy failed: select the text and copy it", ok);
+}
+
+// ---------- formatting ----------
+const numberFormat = new Intl.NumberFormat();
+const fmt = n => numberFormat.format(n || 0);
+const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
+const tokensOf = c => (c ? (c.input || 0) + (c.output || 0) : 0);
+const dateFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" });
+const dateTimeFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+function fmtTokens(n) {
+  n = n || 0;
+  if (n >= 1e9) return +(n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return +(n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return +(n / 1e3).toFixed(1) + "K";
+  return String(Math.round(n));
+}
+function fmtTime(ms) {
+  if (!ms) return "Never";
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return mins + "m ago";
+  if (mins < 1440) return Math.floor(mins / 60) + "h ago";
+  return dateFmt.format(ms);
+}
+function relative(ms, now) {
+  const diff = ms - now, abs = Math.abs(diff);
+  const [n, unit] = abs < 3600000 ? [Math.max(1, Math.round(abs / 60000)), "minute"] : abs < DAY ? [Math.round(abs / 3600000), "hour"] : [Math.round(abs / DAY), "day"];
+  return diff >= 0 ? `in ${plural(n, unit)}` : `${plural(n, unit)} ago`;
+}
+function maskKey(key) { return !key ? "" : key.length <= 12 ? key[0] + "***" : key.slice(0, 8) + "***" + key.slice(-4); }
+
+// ---------- keys ----------
+const SHA = (() => {
+  const primes = [];
+  for (let n = 2; primes.length < 64; n++) if (primes.every(p => n % p)) primes.push(n);
+  const frac = x => ((x - Math.floor(x)) * 4294967296) >>> 0;
+  return { k: primes.map(p => frac(Math.cbrt(p))), h: primes.slice(0, 8).map(p => frac(Math.sqrt(p))) };
+})();
+// Plain SHA-256: crypto.subtle is missing when the panel is served over plain HTTP.
+function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(text);
+  const words = new Uint32Array(((bytes.length + 8) >> 6) * 16 + 16);
+  bytes.forEach((b, i) => { words[i >> 2] |= b << (24 - (i % 4) * 8); });
+  words[bytes.length >> 2] |= 0x80 << (24 - (bytes.length % 4) * 8);
+  words[words.length - 1] = bytes.length * 8;
+  const H = SHA.h.slice(), W = new Uint32Array(64), rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < words.length; off += 16) {
+    for (let t = 0; t < 64; t++) {
+      if (t < 16) { W[t] = words[off + t]; continue; }
+      const a = W[t - 15], b = W[t - 2];
+      W[t] = (rotr(a, 7) ^ rotr(a, 18) ^ (a >>> 3)) + (rotr(b, 17) ^ rotr(b, 19) ^ (b >>> 10)) + W[t - 7] + W[t - 16];
+    }
+    let [a, b, c, d, e, f, g, hh] = H;
+    for (let t = 0; t < 64; t++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA.k[t] + W[t]) | 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    [a, b, c, d, e, f, g, hh].forEach((v, i) => { H[i] = (H[i] + v) | 0; });
+  }
+  return H.map(v => (v >>> 0).toString(16).padStart(8, "0")).join("");
+}
+// The plugin knows a key only by the caller scope CLIProxyAPI derives from it (store.go callerScope).
+function scopeId(key) {
+  let id = scopeIds.get(key);
+  if (!id) { id = sha256Hex(SCOPE_PREFIX + key.trim()); scopeIds.set(key, id); }
+  return id;
+}
+// Same format as the panel's Generate: "sk-" + 48 characters; bytes >= 248 are dropped to avoid modulo bias.
+const KEY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function generateKey() {
+  const out = [];
+  while (out.length < 48) for (const b of crypto.getRandomValues(new Uint8Array(64))) if (b < 248 && out.length < 48) out.push(KEY_ALPHABET[b % 62]);
+  return "sk-" + out.join("");
+}
+
+// ---------- panel session + key names ----------
+// The panel (same origin, it embeds this page) keeps its state in localStorage, XOR-obfuscated with a
+// host/user-agent key behind "enc::v1::".
+function obfuscationKey() { return new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent); }
+function deobfuscate(value) {
+  if (!value || !value.startsWith("enc::v1::")) return value;
+  const key = obfuscationKey(), bin = atob(value.slice(9)), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) ^ key[i % key.length];
+  return new TextDecoder().decode(out);
+}
+function obfuscate(text) {
+  const key = obfuscationKey();
+  let bin = "";
+  new TextEncoder().encode(text).forEach((b, i) => { bin += String.fromCharCode(b ^ key[i % key.length]); });
+  return "enc::v1::" + btoa(bin);
+}
+function panelAuth() {
+  try { const auth = JSON.parse(deobfuscate(storageGet("cli-proxy-auth")) || "null"); return (auth && (auth.state || auth)) || {}; } catch { return {}; }
+}
+function managementSessionKey() {
+  const key = panelAuth().managementKey;
+  if (typeof key === "string" && key) return key;
+  try {
+    const legacy = JSON.parse(deobfuscate(storageGet("managementKey")) || "null");
+    if (typeof legacy === "string" && legacy) return legacy;
+  } catch {}
+  return "";
+}
+// The panel names client keys in this browser only ("api-key-names:v1:<apiBase>", keyed by
+// sha256(["api-key-name", apiBase, key])). Its names fill in keys unnamed here, and names saved here are
+// written back so the panel and the Usage page show them too.
+const nameHash = (base, key) => sha256Hex(JSON.stringify(["api-key-name", base, key]));
+function readNameStore(storageKey) {
+  try {
+    const names = JSON.parse(deobfuscate(localStorage.getItem(storageKey)) || "null");
+    return names && typeof names === "object" && !Array.isArray(names) ? names : {};
+  } catch { return {}; }
+}
+function readPanelNames(keys) {
+  const stores = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(KEY_NAMES_PREFIX)) stores.push([k.slice(KEY_NAMES_PREFIX.length), readNameStore(k)]);
+    }
+  } catch {}
+  const found = {};
+  for (const key of keys) for (const [base, names] of stores) {
+    const name = names[nameHash(base, key)];
+    if (typeof name === "string" && name.trim()) { found[key] = name.trim(); break; }
+  }
+  return found;
+}
+function writePanelName(key, name) {
+  const base = panelAuth().apiBase;
+  if (!base || !key) return;
+  const storageKey = KEY_NAMES_PREFIX + base, names = readNameStore(storageKey), hash = nameHash(base, key);
+  if (name) names[hash] = name; else delete names[hash];
+  try { Object.keys(names).length ? localStorage.setItem(storageKey, obfuscate(JSON.stringify(names))) : localStorage.removeItem(storageKey); } catch {}
+}
+
+// ---------- API + auth ----------
+async function call(method, url, body) {
+  const opts = { method, headers: { Authorization: "Bearer " + state.key }, cache: "no-store" };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  if (res.status === 401 || res.status === 403) {
+    if (ui.content) showAuth("Management key rejected.");
+    throw new Error("unauthorized");
+  }
+  let data = null;
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error((data && (data.message || data.error)) || "HTTP " + res.status);
+  return data;
+}
+// Client keys live in the core config (access.api-keys, the panel's Client API Keys); lists are written whole.
+async function coreKeys() {
+  try {
+    const keys = await call("GET", KEYS_API);
+    return Array.isArray(keys) ? keys.map(k => String(k).trim()).filter(Boolean) : [];
+  } catch (e) {
+    if (e.message === "not_found") return [];
+    throw e;
+  }
+}
+async function writeCoreKeys(keys) {
+  if (keys.length) return call("PUT", KEYS_API, keys);
+  try { await call("DELETE", KEYS_API); } catch (e) { if (e.message !== "not_found") throw e; }
+}
+
+// When the panel does not remember the password, the key only lives in the parent page's memory. Its API
+// client sends it as an XHR Authorization header, so capture the header from the parent's next request
+// (triggered via its plugin refresh event) and keep it in the tab's sessionStorage. The refresh remounts
+// this iframe, so the reloaded page picks the key up from sessionStorage.
+function captureParentKey(timeoutMs) {
+  return new Promise(resolve => {
+    let win;
+    try { win = window.parent; if (!win || win === window || !win.XMLHttpRequest) return resolve(""); } catch { return resolve(""); }
+    const proto = win.XMLHttpRequest.prototype;
+    const original = proto.setRequestHeader;
+    let done = false;
+    const finish = key => {
+      if (done) return;
+      done = true;
+      if (proto.setRequestHeader === wrapper) proto.setRequestHeader = original;
+      resolve(key);
+    };
+    function wrapper(name, value) {
+      if (String(name).toLowerCase() === "authorization" && /^Bearer\s+\S/i.test(String(value))) {
+        const key = String(value).replace(/^Bearer\s+/i, "");
+        try { win.sessionStorage.setItem(SESSION_KEY, key); } catch {}
+        finish(key);
+      }
+      return original.apply(this, arguments);
+    }
+    proto.setRequestHeader = wrapper;
+    try { win.dispatchEvent(new win.Event("plugin-resources-refresh")); } catch {}
+    setTimeout(() => finish(""), timeoutMs);
+  });
+}
+async function tryKey(key, source) {
+  if (!key) return false;
+  state.key = key; state.keySource = source;
+  try { await call("GET", API); } catch (e) { if (e.message === "unauthorized") return false; toast(e.message); }
+  build();
+  return true;
+}
+async function start() {
+  if (await tryKey(managementSessionKey(), "session")) return;
+  if (await tryKey(sessionGet(SESSION_KEY), "session")) { sessionSet(CAPTURE_FLAG, ""); return; }
+  if (await tryKey(storageGet(KEY_STORE), "local")) return;
+  if (!sessionGet(CAPTURE_FLAG)) {
+    sessionSet(CAPTURE_FLAG, "1");
+    if (await tryKey(await captureParentKey(3000), "session")) { sessionSet(CAPTURE_FLAG, ""); return; }
+  }
+  showAuth("Open this page from the management panel while signed in, or enter the management key.");
+}
+function showAuth(msg) {
+  clearInterval(start.poll);
+  ui.content = null;
+  const input = h("input", { class: "input", type: "password", placeholder: "Management key", autocomplete: "off", "aria-label": "Management key" });
+  const go = async () => {
+    const key = input.value.trim();
+    if (!key) return;
+    if (await tryKey(key, "local")) storageSet(KEY_STORE, key);
+    else toast("Management key rejected.");
+  };
+  input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  document.getElementById("app").replaceChildren(h("div", { class: "authWrap" }, h("div", { class: "panel auth" },
+    h("span", { class: "eyebrow" }, "API Key Manager"),
+    h("h1", { class: "authTitle" }, "Connect with the management key"),
+    h("p", { class: "sectionDescription" }, msg),
+    h("div", { class: "row" }, input, h("button", { class: "btn primary", onclick: go }, "Connect")))));
+  input.focus();
+}
+function forgetKey() {
+  storageSet(KEY_STORE, "");
+  state.key = ""; state.keySource = "";
+  showAuth("Key forgotten. Enter the management key to continue.");
+}
+
+// ---------- page ----------
+function build() {
+  ui.title = h("h1", { class: "heroTitle" });
+  ui.meta = h("p", { class: "heroMeta" });
+  ui.tiles = h("div", { class: "statsRow" });
+  ui.table = h("div", { class: "tableWrap xscroll" });
+  ui.content = h("div", { class: "content" },
+    h("section", { class: "hero" },
+      h("div", { class: "heroCopy" }, h("span", { class: "eyebrow" }, "API Key Manager"), ui.title, ui.meta),
+      h("div", { class: "heroActions" },
+        state.keySource === "local" ? h("button", { type: "button", class: "btn ghost", onclick: forgetKey }, "Forget key") : null,
+        h("button", { type: "button", class: "btn", onclick: () => load(), "aria-label": "Refresh" }, icon("refresh", 16)),
+        h("button", { type: "button", class: "btn primary", onclick: () => openEditor(null) }, icon("plus", 16), "Add API key"))),
+    ui.tiles,
+    h("section", { class: "section" },
+      h("div", { class: "sectionHead" }, h("div", { class: "sectionCopy" },
+        h("span", { class: "eyebrow" }, "access.api-keys"),
+        h("h2", { class: "sectionTitle" }, "Client API keys"),
+        h("p", { class: "sectionDescription" }, "The same keys as the panel's Client API Keys. Model requests with an expired key or a key over its token limit are refused with HTTP 403; keys without limits work as before. Usage counts input + output tokens from the moment this plugin was installed."))),
+      ui.table));
+  document.getElementById("app").replaceChildren(ui.content);
+  render();
+  load();
+  clearInterval(start.poll);
+  start.poll = setInterval(() => { if (!document.hidden && ui.content) load(true); }, POLL_MS);
+}
+async function load(quiet) {
+  try {
+    const [keys, mine] = await Promise.all([coreKeys(), call("GET", API)]);
+    state.cfgKeys = keys;
+    state.entries = (mine && mine.keys) || {};
+    state.now = (mine && mine.now) || Date.now();
+    state.error = "";
+  } catch (e) {
+    if (e.message === "unauthorized") return;
+    state.error = e.message;
+    if (!quiet) toast("Could not load keys: " + e.message);
+  }
+  state.loaded = true;
+  state.panelNames = readPanelNames(state.cfgKeys);
+  if (ui.content) render();
+}
+function rows() {
+  const out = [], seen = new Set();
+  for (const key of state.cfgKeys) {
+    const id = scopeId(key), e = state.entries[id];
+    seen.add(id);
+    out.push({ key, id, e, inConfig: true, masked: maskKey(key), name: (e && e.name) || state.panelNames[key] || "" });
+  }
+  // Keys removed from the config elsewhere keep their usage here until forgotten.
+  for (const [id, e] of Object.entries(state.entries)) {
+    if (!seen.has(id)) out.push({ key: "", id, e, inConfig: false, masked: e.masked || id.slice(0, 8) + "…", name: e.name || "" });
+  }
+  return out;
+}
+function statusOf(r) {
+  const e = r.e;
+  if (!r.inConfig) return ["Not in config", "muted"];
+  if (e && e.status === "expired") return ["Expired", "bad"];
+  if (e && e.status === "quota") return ["Limit reached", "bad"];
+  if (e && e.expires_at && e.expires_at - state.now < SOON) return ["Expires soon", "warn"];
+  return ["Active", ""];
+}
+function render() {
+  const list = rows(), live = list.filter(r => r.inConfig);
+  const blocked = live.filter(r => r.e && r.e.status).length;
+  const soon = live.filter(r => r.e && !r.e.status && r.e.expires_at && r.e.expires_at - state.now < SOON).length;
+  const tokens = live.reduce((n, r) => n + tokensOf(r.e && r.e.usage), 0);
+  const requests = live.reduce((n, r) => n + ((r.e && r.e.usage.requests) || 0), 0);
+  const failed = live.reduce((n, r) => n + ((r.e && r.e.usage.failed) || 0), 0);
+  ui.title.replaceChildren(state.loaded ? plural(live.length, "API key") : "API keys", h("span", { class: "heroPeriod", "aria-hidden": "true" }, "."));
+  ui.meta.textContent = state.loaded ? `${fmt(live.length - blocked)} active · ${fmt(blocked)} blocked · ${fmtTokens(tokens)} tokens used` : "Loading…";
+  const tile = (label, value, hint, accent) => h("div", { class: "statTile", style: accent ? `--tile-accent:${accent}` : null },
+    h("span", { class: "statLabel" }, label), h("span", { class: "statValue" }, value), h("span", { class: "statHint" }, hint));
+  ui.tiles.replaceChildren(
+    tile("Active keys", fmt(live.length - blocked), `${plural(live.length, "key")} in access.api-keys`, "var(--viz-success)"),
+    tile("Tokens used", fmtTokens(tokens), "Input + output, all keys", "var(--viz-requests)"),
+    tile("Requests", fmt(requests), failed ? `${fmt(failed)} failed` : "No failures", "var(--viz-requests)"),
+    tile("Blocked", fmt(blocked), soon ? `${fmt(soon)} more expire within 7 days` : "Expired or over the token limit", blocked ? "var(--viz-failure)" : soon ? "var(--amber-color)" : null));
+  renderTable(list);
+}
+function renderTable(list) {
+  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["Requests", "r"], ["Last used"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
+  const empty = text => ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, h("tr", {}, td(text, "empty", { colspan: 7 })))));
+  if (!state.loaded) return empty("Loading keys…");
+  if (state.error && !list.length) return empty("Could not load keys: " + state.error);
+  if (!list.length) return empty("No client API keys yet. Without keys the proxy accepts requests without an API key.");
+  ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, list.map(r => {
+    const e = r.e, [label, tone] = statusOf(r);
+    const stop = fn => ev => { ev.stopPropagation(); fn(); };
+    return h("tr", { class: "click", onclick: () => openUsage(r) },
+      td(h("div", { class: "keyCell" },
+        h("b", { class: r.name ? "" : "unnamed", title: r.name || "" }, r.name || "Unnamed"),
+        h("span", { class: "keyLine" }, r.masked, r.inConfig ? h("button", { type: "button", class: "iconBtn", title: "Copy key", "aria-label": "Copy key", onclick: stop(() => copyText(r.key, "API key")) }, icon("copy", 14)) : null))),
+      td(h("span", { class: "pill " + tone }, label)),
+      td(e && e.expires_at ? [dateFmt.format(e.expires_at), h("span", { class: "sub" }, relative(e.expires_at, state.now))] : h("span", { class: "muted" }, "Never")),
+      td(usageCell(e)),
+      td(fmt(e ? e.usage.requests : 0), "r num"),
+      td(fmtTime(e && e.last_used), "soft"),
+      td(h("div", { class: "actions" },
+        r.inConfig ? h("button", { type: "button", class: "btn ghost sm", onclick: stop(() => openEditor(r)) }, "Edit") : null,
+        h("button", { type: "button", class: "btn ghost sm dangerText", onclick: stop(() => confirmDelete(r)) }, r.inConfig ? "Delete" : "Forget"))));
+  }))));
+}
+function meter(used, limit) {
+  const ratio = limit ? used / limit : 0;
+  const fill = ratio >= 1 ? "var(--viz-failure)" : ratio >= .8 ? "var(--amber-color)" : "var(--viz-success)";
+  return h("div", { class: "meter", style: `--meter-fill:${fill}`, role: "meter", "aria-valuemin": 0, "aria-valuemax": limit, "aria-valuenow": Math.min(used, limit) },
+    h("i", { style: `width:${Math.min(100, ratio * 100)}%` }));
+}
+function usageCell(e) {
+  const used = tokensOf(e && e.usage);
+  if (!e || !e.token_limit) return h("div", { class: "usageCell" }, h("span", { class: "mono" }, fmtTokens(used)), h("span", { class: "sub" }, "No limit"));
+  return h("div", { class: "usageCell" }, h("span", { class: "mono" }, `${fmtTokens(used)} / ${fmtTokens(e.token_limit)}`), meter(used, e.token_limit));
+}
+
+// ---------- modal (core Modal) ----------
+function openModal(title, body, footer) {
+  const root = document.getElementById("modal");
+  const onKey = e => { if (e.key === "Escape") close(); };
+  const close = () => {
+    if (overlay.classList.contains("closing")) return;
+    document.removeEventListener("keydown", onKey);
+    overlay.classList.add("closing");
+    setTimeout(() => { overlay.remove(); if (!root.childElementCount) document.body.classList.remove("modal-open"); }, reducedMotion.matches ? 0 : 280);
+  };
+  const titleId = "modal-title-" + Date.now();
+  const overlay = h("div", { class: "modal-overlay", onmousedown: e => { if (e.target === overlay) close(); } },
+    h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+      h("button", { type: "button", class: "modal-close-floating", "aria-label": "Close", onclick: close }, icon("close", 18)),
+      h("div", { class: "modal-header" }, h("h2", { class: "modal-title", id: titleId }, title)),
+      h("div", { class: "modal-body" }, body),
+      h("div", { class: "modal-footer" }, footer(close))));
+  document.addEventListener("keydown", onKey);
+  document.body.classList.add("modal-open");
+  root.append(overlay);
+  return close;
+}
+// A small confirm dialog; action resolves when done and its error is shown in the dialog.
+function confirmDialog(title, paragraphs, actionLabel, action) {
+  const error = h("p", { class: "formError", hidden: true });
+  openModal(title, [paragraphs.map(p => h("p", {}, p)), error], close => {
+    const ok = h("button", { type: "button", class: "btn danger", onclick: async () => {
+      ok.disabled = true; ok.replaceChildren(spinner(14), actionLabel);
+      try { await action(); close(); } catch (e) { error.textContent = e.message; error.hidden = false; ok.disabled = false; ok.replaceChildren(actionLabel); }
+    } }, actionLabel);
+    return [h("button", { type: "button", class: "btn", onclick: close }, "Cancel"), ok];
+  });
+}
+
+// ---------- add / edit ----------
+function unitFor(limit) { return (UNITS.find(([u]) => limit && limit % u === 0) || UNITS[1])[0]; }
+function endOfDay(dateValue) {
+  const [y, m, d] = dateValue.split("-").map(Number);
+  return y ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime() : 0;
+}
+function dateInputValue(ms) {
+  const d = new Date(ms), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function openEditor(row) {
+  const isNew = !row, e = row && row.e;
+  const f = { expiresAt: (e && e.expires_at) || 0, mode: e && e.expires_at ? "date" : "never" };
+  const nameInput = h("input", { class: "input", maxlength: 120, placeholder: "For example: Alice's laptop", value: row ? row.name : "", autocomplete: "off" });
+  const keyInput = h("input", { class: "input mono", value: row ? row.key : generateKey(), readonly: !isNew, spellcheck: "false", autocomplete: "off", "aria-label": "API key" });
+  const keyButton = isNew
+    ? h("button", { type: "button", class: "btn", onclick: () => { keyInput.value = generateKey(); } }, "Generate")
+    : h("button", { type: "button", class: "btn", onclick: () => copyText(row.key, "API key") }, icon("copy", 15), "Copy");
+  const dateInput = h("input", { class: "input", type: "date", min: dateInputValue(Date.now()), "aria-label": "Expiry date",
+    value: dateInputValue(f.expiresAt || Date.now() + 30 * DAY), onchange: () => { f.expiresAt = endOfDay(dateInput.value); renderExpiry(); } });
+  const expiryHint = h("p", { class: "hint" });
+  const expiryChoice = h("div");
+  const renderExpiry = () => {
+    expiryChoice.replaceChildren(h("div", { class: "segmented", role: "group", "aria-label": "Expiry" }, EXPIRY_PRESETS.map(([v, text]) =>
+      h("button", { type: "button", class: "segment" + (v === f.mode ? " on" : ""), "aria-pressed": String(v === f.mode), onclick: () => {
+        f.mode = v;
+        f.expiresAt = v === "never" ? 0 : v === "date" ? endOfDay(dateInput.value) : Date.now() + Number(v) * DAY;
+        if (v !== "date" && f.expiresAt) dateInput.value = dateInputValue(f.expiresAt);
+        renderExpiry();
+      } }, text))));
+    dateInput.hidden = f.mode !== "date";
+    const now = Date.now();
+    expiryHint.textContent = !f.expiresAt ? "The key never expires."
+      : `${f.expiresAt <= now ? "Expired" : "Expires"} ${dateTimeFmt.format(f.expiresAt)} (${relative(f.expiresAt, now)}). After that, model requests with this key get HTTP 403.`;
+  };
+  renderExpiry();
+  const limit = (e && e.token_limit) || 0, unit = unitFor(limit);
+  const limitInput = h("input", { class: "input", type: "number", min: 0, step: "any", inputmode: "decimal", placeholder: "No limit", value: limit ? String(limit / unit) : "", "aria-label": "Token limit" });
+  const unitSelect = h("select", { class: "input", "aria-label": "Token limit unit" }, UNITS.map(([u, text]) => h("option", { value: u }, text)));
+  unitSelect.value = String(unit);
+  const limitHint = h("p", { class: "hint" });
+  const tokenLimit = () => { const v = limitInput.value.trim(); return v === "" ? 0 : Math.round(Number(v) * Number(unitSelect.value)); };
+  const renderLimit = () => {
+    const v = tokenLimit();
+    limitHint.textContent = !Number.isFinite(v) || v < 0 ? "Enter a positive number, or leave it empty for no limit."
+      : !v ? "No limit. Usage is still counted." : `${fmt(v)} tokens (input + output, cached input included).`;
+  };
+  limitInput.addEventListener("input", renderLimit);
+  unitSelect.addEventListener("change", renderLimit);
+  renderLimit();
+  const error = h("p", { class: "formError", hidden: true });
+  const used = tokensOf(e && e.usage);
+  const body = [
+    h("div", { class: "field" }, h("label", {}, "Name"), nameInput),
+    h("div", { class: "field" }, h("label", {}, "API key"), h("div", { class: "row" }, keyInput, keyButton),
+      h("p", { class: "hint" }, isNew ? "Clients send it as a Bearer token, x-api-key or x-goog-api-key, like any client key." : "To change the key itself, delete it and add a new one.")),
+    h("div", { class: "field" }, h("label", {}, "Expires"), expiryChoice, dateInput, expiryHint),
+    h("div", { class: "field" }, h("label", {}, "Token limit"), h("div", { class: "row" }, limitInput, unitSelect), limitHint),
+    e ? h("div", { class: "usageNote" }, h("span", {}, "Used ", h("b", {}, fmt(used)), " tokens in ", h("b", {}, fmt(e.usage.requests)), " requests")) : null,
+    error,
+  ];
+  openModal(isNew ? "Add API key" : "Edit API key", body, close => {
+    const save = h("button", { type: "button", class: "btn primary", onclick: async () => {
+      error.hidden = true;
+      const key = keyInput.value.trim(), name = nameInput.value.trim(), tl = tokenLimit();
+      const fail = msg => { error.textContent = msg; error.hidden = false; };
+      if (!key) return fail("Please enter an API key.");
+      if (!/^[\x21-\x7E]+$/.test(key)) return fail("The API key may only contain visible ASCII characters, without spaces.");
+      if (isNew && state.cfgKeys.includes(key)) return fail("This API key already exists. Use Edit to change its limits.");
+      if (!Number.isFinite(tl) || tl < 0) return fail("The token limit must be a positive number, or empty for no limit.");
+      if (f.mode === "date" && !f.expiresAt) return fail("Pick an expiry date.");
+      save.disabled = true; save.replaceChildren(spinner(14), "Saving");
+      try {
+        // Limits first: a new key never exists without them, and a failed config write leaves only an unused entry.
+        await call("POST", API + "/save", { id: scopeId(key), masked: maskKey(key), name, expires_at: f.expiresAt, token_limit: tl });
+        if (isNew) {
+          const keys = await coreKeys(); // fresh, so a concurrent edit in the panel is kept
+          if (!keys.includes(key)) await writeCoreKeys([...keys, key]);
+        }
+        writePanelName(key, name);
+        close();
+        toast(isNew ? "API key added" : "API key saved", true);
+        load(true);
+      } catch (err) {
+        if (err.message === "unauthorized") return close();
+        fail(err.message); save.disabled = false; save.replaceChildren("Save");
+      }
+    } }, "Save");
+    return [h("button", { type: "button", class: "btn", onclick: close }, "Cancel"), save];
+  });
+  nameInput.focus();
+}
+function confirmDelete(r) {
+  const label = r.name ? `“${r.name}” (${r.masked})` : r.masked;
+  const last = r.inConfig && state.cfgKeys.length === 1;
+  confirmDialog(r.inConfig ? "Delete API key" : "Forget key",
+    r.inConfig
+      ? [`Delete ${label}? Clients using it stop working at once, and its usage history here is removed.`,
+         last ? "This is the last client API key: with no keys, the proxy accepts requests without an API key." : null].filter(Boolean)
+      : [`Forget the usage and limits kept for ${label}? The key is no longer in access.api-keys.`],
+    r.inConfig ? "Delete" : "Forget",
+    async () => {
+      if (r.inConfig) {
+        const keys = await coreKeys();
+        if (keys.includes(r.key)) await writeCoreKeys(keys.filter(k => k !== r.key));
+        writePanelName(r.key, "");
+      }
+      await call("POST", API + "/delete", { id: r.id });
+      closeSheet();
+      toast(r.inConfig ? "API key deleted" : "Key forgotten", true);
+      load(true);
+    });
+}
+
+// ---------- usage sheet (core Sheet) ----------
+let closeSheet = () => {};
+function openUsage(r) {
+  closeSheet(true);
+  const root = document.getElementById("sheet");
+  const body = h("div", { class: "sheetBody" }, h("p", { class: "muted" }, spinner(14), " Loading usage…"));
+  const [label, tone] = statusOf(r);
+  const onKey = e => { if (e.key === "Escape" && !document.getElementById("modal").childElementCount) close(); };
+  let closing = false;
+  const close = now => {
+    if (closing) return;
+    closing = true;
+    document.removeEventListener("keydown", onKey);
+    overlay.classList.add("closing");
+    setTimeout(() => { overlay.remove(); if (!root.childElementCount) document.body.style.overflow = ""; }, now === true || reducedMotion.matches ? 0 : 260);
+  };
+  closeSheet = close;
+  const overlay = h("div", { class: "sheetOverlay", onclick: e => { if (e.target === overlay) close(); } },
+    h("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-label": "API key usage", tabindex: -1 },
+      h("div", { class: "sheetHead" },
+        h("span", { class: "sheetEyebrow" }, "API key usage"),
+        h("h2", { class: "sheetTitle" }, r.name || "Unnamed key"),
+        h("div", { class: "sheetDesc" }, r.masked, h("span", { class: "pill " + tone }, label)),
+        h("button", { type: "button", class: "closeBtn", "aria-label": "Close", onclick: close }, icon("close", 18))),
+      body));
+  document.addEventListener("keydown", onKey);
+  document.body.style.overflow = "hidden";
+  root.append(overlay);
+  overlay.firstChild.focus();
+  if (!r.e) return body.replaceChildren(sheetActions(r, null, close), h("div", { class: "chartEmpty", style: "height:120px" }, "No requests with this key yet."));
+  call("GET", API + "/detail?id=" + encodeURIComponent(r.id))
+    .then(d => { if (!closing) body.replaceChildren(...usageDetail(r, d, close)); })
+    .catch(e => { if (!closing && e.message !== "unauthorized") body.replaceChildren(h("p", { class: "formError" }, e.message)); });
+}
+function sheetActions(r, d, close) {
+  return h("div", { class: "row", style: "flex-wrap:wrap" },
+    r.inConfig ? h("button", { type: "button", class: "btn sm", onclick: () => { close(); openEditor(r); } }, "Edit limits") : null,
+    r.inConfig ? h("button", { type: "button", class: "btn sm", onclick: () => copyText(r.key, "API key") }, icon("copy", 14), "Copy key") : null,
+    d && d.usage.requests ? h("button", { type: "button", class: "btn sm ghost", onclick: () => confirmDialog("Reset usage",
+      [`Reset the usage of ${r.name || r.masked}? Its token count, request counts and history go back to zero, so a token limit starts over.`], "Reset",
+      async () => { await call("POST", API + "/reset", { id: r.id }); toast("Usage reset", true); await load(true); openUsage(rows().find(x => x.id === r.id) || r); }) }, "Reset usage") : null);
+}
+function usageDetail(r, d, close) {
+  const u = d.usage, used = tokensOf(u), now = d.now || Date.now();
+  const spec = (label, value) => h("div", { class: "specRow" }, h("span", { class: "specLabel" }, label), h("span", { class: "specValue" }, value));
+  const mono = v => h("span", { class: "mono" }, v);
+  const specs = h("div", { class: "specGrid" },
+    spec("Expires", d.expires_at ? `${dateTimeFmt.format(d.expires_at)} (${relative(d.expires_at, now)})` : "Never"),
+    spec("Token limit", d.token_limit ? mono(fmt(d.token_limit)) : "No limit"),
+    spec("Tokens used", mono(fmt(used))),
+    spec("Remaining", d.token_limit ? mono(fmt(Math.max(0, d.token_limit - used))) : "—"),
+    spec("Requests", mono(fmt(u.requests))),
+    spec("Failed", mono(fmt(u.failed))),
+    spec("Input tokens", mono(fmt(u.input))),
+    spec("Output tokens", mono(fmt(u.output))),
+    spec("Cached input", mono(fmt(u.cached))),
+    spec("Reasoning", mono(fmt(u.reasoning))),
+    spec("Last used", d.last_used ? dateTimeFmt.format(d.last_used) : "Never"),
+    spec("Tracked since", d.created_at ? dateFmt.format(d.created_at) : "—"));
+  const models = Object.entries(d.models || {}).sort((a, b) => tokensOf(b[1]) - tokensOf(a[1]));
+  const recent = (d.recent || []).slice().reverse();
+  const table = (cols, bodyRows) => h("div", { class: "tableWrap xscroll" }, h("table", { class: "table" },
+    h("thead", {}, h("tr", {}, cols.map(([t, c]) => h("th", { class: c || "" }, t)))), h("tbody", {}, bodyRows)));
+  return [
+    sheetActions(r, d, close),
+    d.token_limit ? h("div", { class: "block" }, h("div", { class: "row", style: "justify-content:space-between" },
+      h("span", { class: "subTitle" }, "Token limit"), h("span", { class: "mono muted" }, `${fmt(used)} / ${fmt(d.token_limit)}`)), meter(used, d.token_limit)) : null,
+    specs,
+    h("div", { class: "block" }, h("span", { class: "subTitle" }, "Daily tokens · last 30 days"), dailyBars(d.hours, now)),
+    h("div", { class: "block" }, h("span", { class: "subTitle" }, "By model"),
+      table([["Model"], ["Requests", "r"], ["Input", "r"], ["Output", "r"], ["Tokens", "r"]], models.length
+        ? models.map(([m, c]) => h("tr", {}, td(m, "mono"), td(fmt(c.requests), "r num"), td(fmt(c.input), "r num"), td(fmt(c.output), "r num"), td(fmt(tokensOf(c)), "r num")))
+        : h("tr", {}, td("No requests since the last reset.", "empty", { colspan: 5 })))),
+    h("div", { class: "block" }, h("span", { class: "subTitle" }, "Recent requests"),
+      table([["Time"], ["Model"], ["Input", "r"], ["Output", "r"], ["Latency", "r"], ["Status"]], recent.length
+        ? recent.map(q => h("tr", {}, td(dateTimeFmt.format(q.ts), "soft num"), td(q.model, "mono"), td(fmt(q.input), "r num"), td(fmt(q.output), "r num"),
+            td(q.latency_ms ? fmt(q.latency_ms) + " ms" : "—", "r num soft"), td(h("span", { class: "pill" + (q.failed ? " bad" : "") }, q.failed ? "Failed" + (q.status ? " " + q.status : "") : "OK"))))
+        : h("tr", {}, td("No requests since the last reset.", "empty", { colspan: 6 })))),
+  ];
+}
+// Hourly buckets (unix hours) summed into the viewer's last 30 local days.
+function dailyBars(hours, now) {
+  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  const days = [];
+  for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push({ t: d.getTime(), tokens: 0, requests: 0 }); }
+  for (const [hour, c] of Object.entries(hours || {})) {
+    const ms = Number(hour) * 3600000;
+    if (ms < days[0].t) continue;
+    let i = days.length - 1;
+    while (i > 0 && ms < days[i].t) i--;
+    days[i].tokens += tokensOf(c); days[i].requests += c.requests || 0;
+  }
+  const peak = Math.max(...days.map(d => d.tokens));
+  if (!peak) return h("div", { class: "chartEmpty", style: "height:140px" }, "No usage in the last 30 days");
+  return h("div", { class: reducedMotion.matches ? "" : "animate" },
+    h("div", { class: "bars", role: "img", "aria-label": `Daily tokens, peak ${fmtTokens(peak)}` }, days.map((d, i) =>
+      h("div", { class: "barCol", title: `${dayFmt.format(d.t)}: ${fmt(d.tokens)} tokens, ${plural(d.requests, "request")}` },
+        d.tokens ? h("i", { class: "bar", style: `height:${Math.max(2, (d.tokens / peak) * 100)}%;--d:${i * 12}ms` }) : null))),
+    h("div", { class: "barAxis" }, h("span", {}, dayFmt.format(days[0].t)), h("span", {}, "Peak " + fmtTokens(peak)), h("span", {}, "Today")));
+}
+
+start();
+</script>
+</body>
+</html>
