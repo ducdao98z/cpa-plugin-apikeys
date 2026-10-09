@@ -168,6 +168,12 @@ select.input { width: auto; padding-right: 34px; appearance: none; cursor: point
 .usageCell { display: flex; min-width: 150px; flex-direction: column; gap: 2px; }
 .usageCell .meter { margin: 2px 0 0; }
 .actions { display: flex; justify-content: flex-end; gap: 2px; }
+.accessCell { display: flex; max-width: 230px; flex-direction: column; gap: 1px; color: var(--text-tertiary); font-size: 12px; }
+.accessCell span { overflow: hidden; text-overflow: ellipsis; }
+.accessCell b { color: var(--text-secondary); font-weight: 500; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { display: inline-flex; align-items: center; gap: 2px; padding: 2px 2px 2px 9px; border: 1px solid var(--border-color); border-radius: 9999px; background: var(--bg-secondary); color: var(--text-primary); font: 12px/1.5 var(--mono); }
+.tag .iconBtn { width: 20px; height: 20px; border-radius: 9999px; }
 
 /* daily bars */
 .bars { display: flex; align-items: flex-end; gap: 3px; height: 140px; padding-top: 6px; border-bottom: 1px solid var(--border-primary); }
@@ -276,7 +282,7 @@ const ICONS = {
   refresh: "M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
 };
 
-const state = { key: "", keySource: "", cfgKeys: [], entries: {}, now: Date.now(), loaded: false, error: "", panelNames: {} };
+const state = { key: "", keySource: "", cfgKeys: [], entries: {}, now: Date.now(), loaded: false, error: "", panelNames: {}, providersSeen: [] };
 const ui = {}; // element refs filled by build()
 const scopeIds = new Map(); // raw key -> caller scope id
 
@@ -607,7 +613,7 @@ function build() {
       h("div", { class: "sectionHead" }, h("div", { class: "sectionCopy" },
         h("span", { class: "eyebrow" }, "access.api-keys"),
         h("h2", { class: "sectionTitle" }, "Client API keys"),
-        h("p", { class: "sectionDescription" }, "The same keys as the panel's Client API Keys. Model requests with an expired key or a key over its token limit are refused with HTTP 403; keys without limits work as before. Usage counts input + output tokens from the moment this plugin was installed."))),
+        h("p", { class: "sectionDescription" }, "The same keys as the panel's Client API Keys. Model requests with an expired key, a key over its token limit or a model outside the key's list are refused with HTTP 403; a provider list keeps a key on those providers' credentials. Keys without limits work as before. Usage counts input + output tokens from the moment this plugin was installed."))),
       ui.table));
   document.getElementById("app").replaceChildren(ui.content);
   render();
@@ -621,6 +627,7 @@ async function load(quiet) {
     state.cfgKeys = keys;
     state.entries = (mine && mine.keys) || {};
     state.now = (mine && mine.now) || Date.now();
+    state.providersSeen = (mine && mine.providers_seen) || [];
     state.error = "";
   } catch (e) {
     if (e.message === "unauthorized") return;
@@ -671,7 +678,7 @@ function render() {
   renderTable(list);
 }
 function renderTable(list) {
-  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["Requests", "r"], ["Last used"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
+  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["Access"], ["Requests", "r"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
   const empty = text => ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, h("tr", {}, td(text, "empty", { colspan: 7 })))));
   if (!state.loaded) return empty("Loading keys…");
   if (state.error && !list.length) return empty("Could not load keys: " + state.error);
@@ -686,8 +693,8 @@ function renderTable(list) {
       td(h("span", { class: "pill " + tone }, label)),
       td(e && e.expires_at ? [dateFmt.format(e.expires_at), h("span", { class: "sub" }, relative(e.expires_at, state.now))] : h("span", { class: "muted" }, "Never")),
       td(usageCell(e)),
-      td(fmt(e ? e.usage.requests : 0), "r num"),
-      td(fmtTime(e && e.last_used), "soft"),
+      td(accessCell(e)),
+      td([fmt(e ? e.usage.requests : 0), h("span", { class: "sub" }, fmtTime(e && e.last_used))], "r num"),
       td(h("div", { class: "actions" },
         r.inConfig ? h("button", { type: "button", class: "btn ghost sm", onclick: stop(() => openEditor(r)) }, "Edit") : null,
         h("button", { type: "button", class: "btn ghost sm dangerText", onclick: stop(() => confirmDelete(r)) }, r.inConfig ? "Delete" : "Forget"))));
@@ -698,6 +705,14 @@ function meter(used, limit) {
   const fill = ratio >= 1 ? "var(--viz-failure)" : ratio >= .8 ? "var(--amber-color)" : "var(--viz-success)";
   return h("div", { class: "meter", style: `--meter-fill:${fill}`, role: "meter", "aria-valuemin": 0, "aria-valuemax": limit, "aria-valuenow": Math.min(used, limit) },
     h("i", { style: `width:${Math.min(100, ratio * 100)}%` }));
+}
+const shortList = list => (list.length <= 2 ? list.join(", ") : `${list.slice(0, 2).join(", ")} +${list.length - 2}`);
+function accessCell(e) {
+  const models = (e && e.allowed_models) || [], providers = (e && e.allowed_providers) || [];
+  if (!models.length && !providers.length) return h("span", { class: "muted" }, "All models");
+  return h("div", { class: "accessCell" },
+    models.length ? h("span", { title: models.join(", ") }, "Models ", h("b", { class: "mono" }, shortList(models))) : null,
+    providers.length ? h("span", { title: providers.join(", ") }, "Providers ", h("b", { class: "mono" }, shortList(providers))) : null);
 }
 function usageCell(e) {
   const used = tokensOf(e && e.usage);
@@ -749,6 +764,56 @@ function dateInputValue(ms) {
   const d = new Date(ms), p = n => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+// Allow-list editor: chips for the chosen patterns; the browser's datalist suggests known names.
+function tagInput(values, placeholder, label) {
+  const list = values.slice();
+  const listId = "suggest-" + label.replace(/\W+/g, "-").toLowerCase();
+  const tags = h("div", { class: "tags" });
+  const datalist = h("datalist", { id: listId });
+  let options = [];
+  const input = h("input", { class: "input mono", list: listId, placeholder, autocomplete: "off", spellcheck: "false", "aria-label": label });
+  const render = () => {
+    tags.replaceChildren(...list.map((v, i) => h("span", { class: "tag" }, v,
+      h("button", { type: "button", class: "iconBtn", "aria-label": "Remove " + v, onclick: () => { list.splice(i, 1); render(); } }, icon("close", 12)))));
+    tags.hidden = !list.length;
+    datalist.replaceChildren(...options.filter(o => !list.includes(o)).map(o => h("option", { value: o })));
+  };
+  const add = () => {
+    for (const part of input.value.split(/[\s,]+/)) {
+      const v = part.trim().toLowerCase();
+      if (v && !list.includes(v)) list.push(v);
+    }
+    input.value = "";
+    render();
+  };
+  input.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === ",") { ev.preventDefault(); add(); } });
+  input.addEventListener("input", ev => { if (!ev.inputType || ev.inputType === "insertReplacementText") add(); }); // picked from the datalist
+  render();
+  return {
+    el: h("div", { class: "field" }, tags, h("div", { class: "row" }, input, h("button", { type: "button", class: "btn", onclick: add }, "Add")), datalist),
+    values: () => { add(); return list.slice(); },
+    setOptions: next => { options = next; render(); },
+  };
+}
+// Names to suggest: models from /v1/models (asked with a client key), providers the plugin met while
+// scheduling plus those in credentials and in the api-keys config.
+async function loadSuggestions() {
+  if (loadSuggestions.cache) return loadSuggestions.cache;
+  const models = new Set(), providers = new Set(state.providersSeen);
+  const add = (set, v) => { if (v) set.add(String(v).toLowerCase()); };
+  await Promise.all([
+    state.cfgKeys.length ? fetch("/v1/models", { headers: { Authorization: "Bearer " + state.cfgKeys[0] }, cache: "no-store" })
+      .then(res => (res.ok ? res.json() : null)).then(d => { for (const m of (d && d.data) || []) add(models, m && m.id); }).catch(() => {}) : null,
+    call("GET", "/v8/management/credentials").then(d => { for (const f of (d && d.files) || []) add(providers, f.provider); }).catch(() => {}),
+    call("GET", "/v8/management/config/api-keys").then(groups => {
+      for (const [group, entries] of Object.entries(groups || {})) {
+        if (group !== "openai-compatibility") add(providers, group);
+        else for (const c of entries || []) if (c && c.name) add(providers, "openai-compatible-" + c.name);
+      }
+    }).catch(() => {}),
+  ]);
+  return (loadSuggestions.cache = { models: [...models].sort(), providers: [...providers].sort() });
+}
 function openEditor(row) {
   const isNew = !row, e = row && row.e;
   const f = { expiresAt: (e && e.expires_at) || 0, mode: e && e.expires_at ? "date" : "never" };
@@ -789,6 +854,9 @@ function openEditor(row) {
   limitInput.addEventListener("input", renderLimit);
   unitSelect.addEventListener("change", renderLimit);
   renderLimit();
+  const models = tagInput((e && e.allowed_models) || [], "gpt-5*, claude-sonnet-*…", "Allowed models");
+  const providers = tagInput((e && e.allowed_providers) || [], "codex, claude, openai-compatible-…", "Allowed providers");
+  loadSuggestions().then(sg => { models.setOptions(sg.models); providers.setOptions(sg.providers); });
   const error = h("p", { class: "formError", hidden: true });
   const used = tokensOf(e && e.usage);
   const body = [
@@ -797,6 +865,10 @@ function openEditor(row) {
       h("p", { class: "hint" }, isNew ? "Clients send it as a Bearer token, x-api-key or x-goog-api-key, like any client key." : "To change the key itself, delete it and add a new one.")),
     h("div", { class: "field" }, h("label", {}, "Expires"), expiryChoice, dateInput, expiryHint),
     h("div", { class: "field" }, h("label", {}, "Token limit"), h("div", { class: "row" }, limitInput, unitSelect), limitHint),
+    h("div", { class: "field" }, h("label", {}, "Models"), models.el,
+      h("p", { class: "hint" }, "Empty allows every model. * matches any text. Other models get HTTP 403.")),
+    h("div", { class: "field" }, h("label", {}, "Providers"), providers.el,
+      h("p", { class: "hint" }, "Empty allows every provider. Requests only use credentials of these providers; a model none of them serves fails.")),
     e ? h("div", { class: "usageNote" }, h("span", {}, "Used ", h("b", {}, fmt(used)), " tokens in ", h("b", {}, fmt(e.usage.requests)), " requests")) : null,
     error,
   ];
@@ -813,7 +885,8 @@ function openEditor(row) {
       save.disabled = true; save.replaceChildren(spinner(14), "Saving");
       try {
         // Limits first: a new key never exists without them, and a failed config write leaves only an unused entry.
-        await call("POST", API + "/save", { id: scopeId(key), masked: maskKey(key), name, expires_at: f.expiresAt, token_limit: tl });
+        await call("POST", API + "/save", { id: scopeId(key), masked: maskKey(key), name, expires_at: f.expiresAt, token_limit: tl,
+          allowed_models: models.values(), allowed_providers: providers.values() });
         if (isNew) {
           const keys = await coreKeys(); // fresh, so a concurrent edit in the panel is kept
           if (!keys.includes(key)) await writeCoreKeys([...keys, key]);
@@ -902,6 +975,8 @@ function usageDetail(r, d, close) {
   const specs = h("div", { class: "specGrid" },
     spec("Expires", d.expires_at ? `${dateTimeFmt.format(d.expires_at)} (${relative(d.expires_at, now)})` : "Never"),
     spec("Token limit", d.token_limit ? mono(fmt(d.token_limit)) : "No limit"),
+    spec("Models", (d.allowed_models || []).length ? mono(d.allowed_models.join(", ")) : "All"),
+    spec("Providers", (d.allowed_providers || []).length ? mono(d.allowed_providers.join(", ")) : "All"),
     spec("Tokens used", mono(fmt(used))),
     spec("Remaining", d.token_limit ? mono(fmt(Math.max(0, d.token_limit - used))) : "—"),
     spec("Requests", mono(fmt(u.requests))),

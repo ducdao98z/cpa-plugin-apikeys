@@ -1,7 +1,8 @@
 # API Key Manager plugin for CLIProxyAPI
 
 Manage the client API keys of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (`access.api-keys`, the
-panel's Client API Keys) with expiry dates and token limits, and see what each key used.
+panel's Client API Keys) with expiry dates, token limits and the models and providers each key may use, and see what
+each key used.
 
 - **Keys:** add (generated like the panel's Generate), rename, set limits, delete. Keys are written to the core
   config through the Management API, so the panel and this page always show the same list.
@@ -10,6 +11,14 @@ panel's Client API Keys) with expiry dates and token limits, and see what each k
 - **Token limit:** input + output tokens (cached input included). Once used, model requests get HTTP 403
   (`token_quota_exceeded`) until the limit is raised or the usage is reset. The check runs before each request,
   so requests already running can overshoot it.
+- **Models:** an optional allow-list of patterns (`*` matches any text, e.g. `gpt-5*`, `claude-sonnet-*`), matched
+  case-insensitively against the requested model or the model its alias resolves to. Other models get HTTP 403
+  (`model_not_allowed`).
+- **Providers:** an optional allow-list of provider keys (`codex`, `claude`, `gemini-cli`,
+  `openai-compatible-<name>`, …; `*` works too). The key's requests only use credentials of those providers, even
+  for a model that other providers also serve. A model none of them can serve fails with HTTP 500
+  (`provider_not_allowed`): the plugin scheduler API cannot set a status code. Pair it with a model list to keep
+  clients on models their providers serve.
 - **Usage:** per key totals, last 30 days by day, by model, and the last 20 requests.
 - Follows the panel's theme and reuses its login; key names are shared with the panel (and the
   [Usage Analytics](https://github.com/ducdao98z/cpa-plugin-usage) plugin) in the same browser.
@@ -58,7 +67,13 @@ plugins:
 
 - Keys are identified by their caller scope, the SHA-256 that CLIProxyAPI attaches to every request as
   `caller_scope`. The plugin never sees or stores a raw key; its file holds limits, the masked key and usage.
-- `request.intercept_before` refuses requests of expired or exhausted keys; `usage.handle` counts tokens.
+- `request.intercept_before` refuses requests of expired or exhausted keys and models off the list; `usage.handle`
+  counts tokens.
+- Provider lists use the plugin scheduler (CLIProxyAPI runs one scheduler plugin at a time). It only decides for a key
+  with a provider list when some candidate credentials belong to other providers: it then picks among the allowed
+  ones (highest priority first; a session keeps its credential, otherwise they rotate). In every other case it
+  declines and the built-in scheduler chooses as before, with its affinity, weights and strategy. Requests routed to
+  a plugin executor (for example System One models) skip credential selection, so only model lists apply to them.
 - The data file is rewritten at most every 5 s while requests arrive, and at once when a key changes.
 
 ### Management API
@@ -70,7 +85,7 @@ All routes need the management key. `id` is the key's caller scope:
 |---|---|
 | `GET /v0/management/apikeys` | Limits, usage totals and status of every known key |
 | `GET /v0/management/apikeys/detail?id=` | One key with usage by model, by hour (31 days) and recent requests |
-| `POST /v0/management/apikeys/save` | `{id, masked, name, expires_at, token_limit}` (unix ms, tokens; 0 = none) |
+| `POST /v0/management/apikeys/save` | `{id, masked, name, expires_at, token_limit, allowed_models, allowed_providers}` (unix ms, tokens, pattern lists; 0 or empty = none) |
 | `POST /v0/management/apikeys/delete` | `{id}`: forget limits and usage |
 | `POST /v0/management/apikeys/reset` | `{id}`: zero the usage, restarting the token limit |
 

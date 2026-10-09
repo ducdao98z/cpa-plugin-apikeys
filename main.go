@@ -76,7 +76,7 @@ const (
 )
 
 // pluginVersion is set from the release tag with -ldflags "-X main.pluginVersion=...".
-var pluginVersion = "0.1.0"
+var pluginVersion = "0.2.0"
 
 var store = &keyStore{keys: map[string]*keyEntry{}}
 
@@ -95,16 +95,34 @@ type registration struct {
 }
 
 type registrationCapability struct {
-	RequestInterceptor bool `json:"request_interceptor"`
-	UsagePlugin        bool `json:"usage_plugin"`
-	ManagementAPI      bool `json:"management_api"`
+	RequestInterceptor        bool `json:"request_interceptor"`
+	Scheduler                 bool `json:"scheduler"`
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities"`
+	UsagePlugin               bool `json:"usage_plugin"`
+	ManagementAPI             bool `json:"management_api"`
 }
 
 // interceptRequest keeps only what the limit check needs; the request body is skipped, not decoded.
 type interceptRequest struct {
-	Metadata struct {
+	Model          string
+	RequestedModel string
+	Metadata       struct {
 		CallerScope string `json:"caller_scope"` // sha256 of the client API key, see callerScope
 	}
+}
+
+// schedulerRequest keeps what the provider filter needs from pluginapi.SchedulerPickRequest.
+type schedulerRequest struct {
+	Model   string
+	Options struct {
+		Metadata struct {
+			CallerScope      string `json:"caller_scope"`
+			CanonicalSession string `json:"canonical_session_id"`
+			DerivedSession   string `json:"derived_session_id"`
+			ExecutionSession string `json:"execution_session_id"`
+		}
+	}
+	Candidates []schedulerCandidate
 }
 
 func main() {}
@@ -170,7 +188,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, errUnmarshal
 		}
-		status, body := store.rejection(req.Metadata.CallerScope, time.Now())
+		status, body := store.rejection(req.Metadata.CallerScope, req.RequestedModel, req.Model, time.Now())
 		if status == 0 {
 			return okEnvelope(struct{}{})
 		}
@@ -182,6 +200,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		})
 	case pluginabi.MethodRequestInterceptAfter:
 		return okEnvelope(struct{}{})
+	case pluginabi.MethodSchedulerPick:
+		var req schedulerRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		meta := req.Options.Metadata
+		return okEnvelope(store.pick(meta.CallerScope, firstNonEmpty(meta.CanonicalSession, meta.DerivedSession, meta.ExecutionSession), req.Model, req.Candidates))
 	case pluginabi.MethodUsageHandle:
 		var rec pluginapi.UsageRecord
 		if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
@@ -246,8 +271,11 @@ func pluginRegistration() registration {
 		},
 		Capabilities: registrationCapability{
 			RequestInterceptor: true,
-			UsagePlugin:        true,
-			ManagementAPI:      true,
+			// Provider limits need every allowed credential, not just the highest priority tier.
+			Scheduler:                 true,
+			SchedulerAcrossPriorities: true,
+			UsagePlugin:               true,
+			ManagementAPI:             true,
 		},
 	}
 }

@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -58,16 +61,19 @@ type recentRequest struct {
 // keyEntry holds the limits and usage of one client API key. Entries are keyed by the key's caller
 // scope (see callerScope), so raw keys never reach this plugin or its file.
 type keyEntry struct {
-	Masked     string               `json:"masked,omitempty"`
-	Name       string               `json:"name,omitempty"`
-	CreatedAt  int64                `json:"created_at,omitempty"`  // unix ms
-	ExpiresAt  int64                `json:"expires_at,omitempty"`  // unix ms, 0 = never
-	TokenLimit int64                `json:"token_limit,omitempty"` // input + output tokens, 0 = unlimited
-	Usage      counters             `json:"usage"`
-	LastUsed   int64                `json:"last_used,omitempty"`
-	Models     map[string]*counters `json:"models,omitempty"`
-	Hours      map[int64]*counters  `json:"hours,omitempty"`  // unix hour -> usage
-	Recent     []recentRequest      `json:"recent,omitempty"` // oldest first
+	Masked     string `json:"masked,omitempty"`
+	Name       string `json:"name,omitempty"`
+	CreatedAt  int64  `json:"created_at,omitempty"`  // unix ms
+	ExpiresAt  int64  `json:"expires_at,omitempty"`  // unix ms, 0 = never
+	TokenLimit int64  `json:"token_limit,omitempty"` // input + output tokens, 0 = unlimited
+	// Allow-lists of lower-case patterns (* = any run of characters); empty allows everything.
+	AllowedModels    []string             `json:"allowed_models,omitempty"`
+	AllowedProviders []string             `json:"allowed_providers,omitempty"`
+	Usage            counters             `json:"usage"`
+	LastUsed         int64                `json:"last_used,omitempty"`
+	Models           map[string]*counters `json:"models,omitempty"`
+	Hours            map[int64]*counters  `json:"hours,omitempty"`  // unix hour -> usage
+	Recent           []recentRequest      `json:"recent,omitempty"` // oldest first
 }
 
 // status reports why the key is refused, or "" while it may be used.
@@ -192,30 +198,29 @@ func (s *keyStore) touch() {
 	})
 }
 
-// rejection returns the HTTP status and body that refuse a request, or 0 when it may proceed.
-// Keys without an entry are unlimited.
-func (s *keyStore) rejection(scope string, now time.Time) (int, []byte) {
+// rejection returns the HTTP status and body that refuse a request for the client-requested and the
+// resolved model, or 0 when it may proceed. Keys without an entry are unlimited.
+func (s *keyStore) rejection(scope, requested, model string, now time.Time) (int, []byte) {
 	if scope == "" {
 		return 0, nil
 	}
+	var code, message string
 	s.mu.RLock()
-	e := s.keys[scope]
-	var status, message string
-	if e != nil {
-		switch status = e.status(now); status {
+	if e := s.keys[scope]; e != nil {
+		switch e.status(now) {
 		case statusExpired:
-			message = "This API key expired on " + time.UnixMilli(e.ExpiresAt).UTC().Format("2006-01-02 15:04 UTC") + "."
+			code, message = "api_key_expired", "This API key expired on "+time.UnixMilli(e.ExpiresAt).UTC().Format("2006-01-02 15:04 UTC")+"."
 		case statusQuota:
-			message = fmt.Sprintf("This API key has used its token limit (%d of %d tokens).", e.Usage.Input+e.Usage.Output, e.TokenLimit)
+			code, message = "token_quota_exceeded", fmt.Sprintf("This API key has used its token limit (%d of %d tokens).", e.Usage.Input+e.Usage.Output, e.TokenLimit)
+		default:
+			if !modelAllowed(e.AllowedModels, requested, model) {
+				code, message = "model_not_allowed", fmt.Sprintf("This API key may not use model %q.", firstNonEmpty(requested, model, "unknown"))
+			}
 		}
 	}
 	s.mu.RUnlock()
-	if status == "" {
+	if code == "" {
 		return 0, nil
-	}
-	code := "api_key_expired"
-	if status == statusQuota {
-		code = "token_quota_exceeded"
 	}
 	// One body that Anthropic- and OpenAI-style clients both read. 403, not 429: a retry cannot succeed.
 	body, _ := json.Marshal(map[string]any{
@@ -282,8 +287,114 @@ func addTo[K comparable](m map[K]*counters, k K, c counters) map[K]*counters {
 	return m
 }
 
+// schedulerCandidate is the part of pluginapi.SchedulerAuthCandidate the provider filter reads.
+type schedulerCandidate struct {
+	ID       string
+	Provider string
+	Priority int
+}
+
+var (
+	pickTurn      atomic.Uint32
+	seenProviders sync.Map // provider keys met in scheduling, suggested by the page
+)
+
+// pick narrows credential selection to the providers a key may use. It declines, so the host's own
+// scheduler decides with its affinity, weights and strategy, whenever every candidate is allowed.
+func (s *keyStore) pick(scope, session, model string, candidates []schedulerCandidate) pluginapi.SchedulerPickResponse {
+	var providers []string
+	s.mu.RLock()
+	if e := s.keys[scope]; e != nil {
+		providers = e.AllowedProviders
+	}
+	s.mu.RUnlock()
+	var allowed []schedulerCandidate
+	for _, c := range candidates {
+		c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
+		seenProviders.Store(c.Provider, struct{}{})
+		if len(providers) == 0 || matchAny(providers, c.Provider) {
+			allowed = append(allowed, c)
+		}
+	}
+	switch {
+	case len(allowed) == len(candidates):
+		return pluginapi.SchedulerPickResponse{}
+	case len(allowed) == 0:
+		return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectCode: "provider_not_allowed",
+			RejectReason: fmt.Sprintf("This API key may only use providers %s, and none of them can serve model %q now.", strings.Join(providers, ", "), model)}
+	}
+	best := allowed[0].Priority
+	for _, c := range allowed {
+		best = max(best, c.Priority)
+	}
+	var top []schedulerCandidate
+	for _, c := range allowed {
+		if c.Priority == best {
+			top = append(top, c)
+		}
+	}
+	sort.Slice(top, func(i, j int) bool { return top[i].ID < top[j].ID })
+	// ponytail: a session keeps its credential by hash (prompt caches stay warm), others rotate;
+	// the host's weights and cooldown history are not consulted for this narrowed set.
+	turn := pickTurn.Add(1)
+	if session != "" {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(session))
+		turn = h.Sum32()
+	}
+	return pluginapi.SchedulerPickResponse{Handled: true, AuthID: top[turn%uint32(len(top))].ID}
+}
+
+// modelAllowed reports whether a key limited to patterns may run the client-requested or the resolved
+// model; either may match, so aliases work. An empty list allows every model.
+func modelAllowed(patterns []string, models ...string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, m := range models {
+		m = strings.ToLower(strings.TrimSpace(m))
+		if i := strings.IndexByte(m, '('); i > 0 && strings.HasSuffix(m, ")") {
+			m = m[:i] // thinking suffix, e.g. gemini-2.5-pro(8192)
+		}
+		if m != "" && matchAny(patterns, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchAny(patterns []string, s string) bool {
+	for _, p := range patterns {
+		if matchPattern(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchPattern reports whether s matches pattern, where * matches any run of characters, slashes
+// included (path.Match stops at "/", which model names such as vendor/model contain).
+func matchPattern(pattern, s string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == s
+	}
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+	for _, part := range parts[1 : len(parts)-1] {
+		i := strings.Index(s, part)
+		if i < 0 {
+			return false
+		}
+		s = s[i+len(part):]
+	}
+	return strings.HasSuffix(s, parts[len(parts)-1])
+}
+
 // save creates or updates the limits of a key; its usage is kept.
-func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, now time.Time) error {
+func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, models, providers []string, now time.Time) error {
 	s.mu.Lock()
 	e := s.keys[id]
 	if e == nil {
@@ -293,7 +404,7 @@ func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, no
 	if masked != "" {
 		e.Masked = masked
 	}
-	e.Name, e.ExpiresAt, e.TokenLimit = name, expiresAt, tokenLimit
+	e.Name, e.ExpiresAt, e.TokenLimit, e.AllowedModels, e.AllowedProviders = name, expiresAt, tokenLimit, models, providers
 	s.touch()
 	s.mu.Unlock()
 	return s.commit()

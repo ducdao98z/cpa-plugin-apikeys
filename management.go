@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +23,7 @@ const (
 	apiBase      = "/v0/management/apikeys"
 	resourceBase = "/v0/resource/plugins/" + pluginIdentifier
 	maxNameLen   = 120
+	maxPatterns  = 100
 )
 
 type managementRoute struct {
@@ -38,22 +40,26 @@ type resourceRoute struct {
 
 // keySummary is a key without its history, for the list.
 type keySummary struct {
-	Masked     string   `json:"masked,omitempty"`
-	Name       string   `json:"name,omitempty"`
-	CreatedAt  int64    `json:"created_at,omitempty"`
-	ExpiresAt  int64    `json:"expires_at,omitempty"`
-	TokenLimit int64    `json:"token_limit,omitempty"`
-	Usage      counters `json:"usage"`
-	LastUsed   int64    `json:"last_used,omitempty"`
-	Status     string   `json:"status,omitempty"`
+	Masked           string   `json:"masked,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	CreatedAt        int64    `json:"created_at,omitempty"`
+	ExpiresAt        int64    `json:"expires_at,omitempty"`
+	TokenLimit       int64    `json:"token_limit,omitempty"`
+	AllowedModels    []string `json:"allowed_models,omitempty"`
+	AllowedProviders []string `json:"allowed_providers,omitempty"`
+	Usage            counters `json:"usage"`
+	LastUsed         int64    `json:"last_used,omitempty"`
+	Status           string   `json:"status,omitempty"`
 }
 
 type keyRequest struct {
-	ID         string `json:"id"` // caller scope of the key
-	Masked     string `json:"masked"`
-	Name       string `json:"name"`
-	ExpiresAt  int64  `json:"expires_at"`
-	TokenLimit int64  `json:"token_limit"`
+	ID               string   `json:"id"` // caller scope of the key
+	Masked           string   `json:"masked"`
+	Name             string   `json:"name"`
+	ExpiresAt        int64    `json:"expires_at"`
+	TokenLimit       int64    `json:"token_limit"`
+	AllowedModels    []string `json:"allowed_models"`    // model patterns, empty = all
+	AllowedProviders []string `json:"allowed_providers"` // provider key patterns, empty = all
 }
 
 func managementRegistration() map[string]any {
@@ -61,7 +67,7 @@ func managementRegistration() map[string]any {
 		"routes": []managementRoute{
 			{Method: http.MethodGet, Path: apiBase, Description: "Limits and usage totals of every known client API key, by caller scope id."},
 			{Method: http.MethodGet, Path: apiBase + "/detail", Description: "One key with its usage by model, hourly usage (31 days) and recent requests (?id)."},
-			{Method: http.MethodPost, Path: apiBase + "/save", Description: "Create or update a key's name, expiry (unix ms) and token limit; usage is kept."},
+			{Method: http.MethodPost, Path: apiBase + "/save", Description: "Create or update a key's name, expiry (unix ms), token limit and allowed models/providers (* patterns); usage is kept."},
 			{Method: http.MethodPost, Path: apiBase + "/delete", Description: "Forget a key's limits and usage."},
 			{Method: http.MethodPost, Path: apiBase + "/reset", Description: "Zero a key's usage, which restarts its token limit."},
 		},
@@ -83,10 +89,14 @@ func handleManagement(req pluginapi.ManagementRequest, now time.Time) pluginapi.
 		store.mu.RLock()
 		keys := make(map[string]keySummary, len(store.keys))
 		for id, e := range store.keys {
-			keys[id] = keySummary{Masked: e.Masked, Name: e.Name, CreatedAt: e.CreatedAt, ExpiresAt: e.ExpiresAt, TokenLimit: e.TokenLimit, Usage: e.Usage, LastUsed: e.LastUsed, Status: e.status(now)}
+			keys[id] = keySummary{Masked: e.Masked, Name: e.Name, CreatedAt: e.CreatedAt, ExpiresAt: e.ExpiresAt, TokenLimit: e.TokenLimit,
+				AllowedModels: e.AllowedModels, AllowedProviders: e.AllowedProviders, Usage: e.Usage, LastUsed: e.LastUsed, Status: e.status(now)}
 		}
 		store.mu.RUnlock()
-		return jsonResponse(http.StatusOK, map[string]any{"now": now.UnixMilli(), "keys": keys})
+		var seen []string
+		seenProviders.Range(func(p, _ any) bool { seen = append(seen, p.(string)); return true })
+		sort.Strings(seen)
+		return jsonResponse(http.StatusOK, map[string]any{"now": now.UnixMilli(), "keys": keys, "providers_seen": seen})
 	case "GET " + apiBase + "/detail":
 		store.mu.RLock()
 		defer store.mu.RUnlock() // the history maps are marshaled in place
@@ -110,7 +120,7 @@ func handleManagement(req pluginapi.ManagementRequest, now time.Time) pluginapi.
 		var errApply error
 		switch {
 		case strings.HasSuffix(reqPath, "/save"):
-			errApply = store.save(body.ID, body.Masked, body.Name, body.ExpiresAt, body.TokenLimit, now)
+			errApply = store.save(body.ID, body.Masked, body.Name, body.ExpiresAt, body.TokenLimit, body.AllowedModels, body.AllowedProviders, now)
 		case strings.HasSuffix(reqPath, "/delete"):
 			errApply = store.remove(body.ID)
 		default:
@@ -139,7 +149,32 @@ func validate(r *keyRequest) string {
 	case r.ExpiresAt < 0 || r.TokenLimit < 0:
 		return "expires_at and token_limit must not be negative"
 	}
+	var ok bool
+	if r.AllowedModels, ok = patterns(r.AllowedModels); !ok {
+		return "allowed_models: at most 100 patterns of up to 200 characters"
+	}
+	if r.AllowedProviders, ok = patterns(r.AllowedProviders); !ok {
+		return "allowed_providers: at most 100 patterns of up to 200 characters"
+	}
 	return ""
+}
+
+// patterns trims, lower-cases and dedupes allow-list entries; matching is case-insensitive.
+func patterns(in []string) ([]string, bool) {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range in {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		if len(p) > 200 {
+			return nil, false
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out, len(out) <= maxPatterns
 }
 
 func jsonResponse(status int, v any) pluginapi.ManagementResponse {
