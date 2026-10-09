@@ -33,7 +33,7 @@ func TestLimits(t *testing.T) {
 	if status, _ := s.rejection(id, "gpt-5", "gpt-5", now); status != 0 {
 		t.Fatal("a key without limits must pass")
 	}
-	if errSave := s.save(id, maskKey(testKey), "alice", 0, 1000, nil, nil, now); errSave != nil {
+	if errSave := s.save(id, maskKey(testKey), "alice", 0, 1000, nil, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	use(s, testKey, 400, 200, now)
@@ -54,7 +54,7 @@ func TestLimits(t *testing.T) {
 	if status, _ := s.rejection(id, "gpt-5", "gpt-5", now); status != 0 {
 		t.Fatal("reset must restart the limit")
 	}
-	if errSave := s.save(id, "", "alice", now.UnixMilli(), 0, nil, nil, now); errSave != nil {
+	if errSave := s.save(id, "", "alice", now.UnixMilli(), 0, nil, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	if status, body := s.rejection(id, "gpt-5", "gpt-5", now); status != http.StatusForbidden || !strings.Contains(string(body), "api_key_expired") {
@@ -73,7 +73,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatal(errOpen)
 	}
 	id := callerScope(testKey)
-	if errSave := s.save(id, maskKey(testKey), "alice", 0, 5000, []string{"gpt-5*"}, nil, now); errSave != nil {
+	if errSave := s.save(id, maskKey(testKey), "alice", 0, 5000, []string{"gpt-5*"}, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	use(s, testKey, 100, 50, now)
@@ -101,7 +101,7 @@ func TestInterceptEnvelope(t *testing.T) {
 	t.Cleanup(func() { store = saved })
 	store = &keyStore{keys: map[string]*keyEntry{}}
 	id := callerScope(testKey)
-	if errSave := store.save(id, "", "", 1, 0, nil, nil, time.Now()); errSave != nil { // expired in 1970
+	if errSave := store.save(id, "", "", 1, 0, nil, time.Now()); errSave != nil { // expired in 1970
 		t.Fatal(errSave)
 	}
 	call := func(scope string) pluginapi.RequestInterceptResponse {
@@ -138,7 +138,6 @@ func TestMatchPattern(t *testing.T) {
 		{"openrouter/*", "openrouter/anthropic/claude", true}, // * crosses slashes
 		{"ab*ba", "aba", false},                               // prefix and suffix may not overlap
 		{"a*b*c", "abcbc", true},
-		{"openai-compatible-*", "codex", false},
 	} {
 		if got := matchPattern(tc.pattern, tc.s); got != tc.want {
 			t.Errorf("matchPattern(%q, %q) = %v", tc.pattern, tc.s, got)
@@ -150,7 +149,7 @@ func TestModelRules(t *testing.T) {
 	now := time.Now()
 	s := &keyStore{keys: map[string]*keyEntry{}}
 	id := callerScope(testKey)
-	if errSave := s.save(id, "", "", 0, 0, []string{"gpt-5*", "claude-sonnet-*"}, nil, now); errSave != nil {
+	if errSave := s.save(id, "", "", 0, 0, []string{"gpt-5*", "claude-sonnet-*"}, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	for _, tc := range []struct {
@@ -168,49 +167,5 @@ func TestModelRules(t *testing.T) {
 		if (status == 0) != tc.allowed || (!tc.allowed && !strings.Contains(string(body), "model_not_allowed")) {
 			t.Errorf("%q/%q: got %d %s", tc.requested, tc.model, status, body)
 		}
-	}
-}
-
-func TestPick(t *testing.T) {
-	s := &keyStore{keys: map[string]*keyEntry{}}
-	id := callerScope(testKey)
-	cands := []schedulerCandidate{{ID: "codex-1", Provider: "codex"}, {ID: "claude-1", Provider: "Claude"}, {ID: "compat-1", Provider: "openai-compatible-cheap", Priority: 5}}
-	pick := func(providers []string, session string, c []schedulerCandidate) pluginapi.SchedulerPickResponse {
-		if errSave := s.save(id, "", "", 0, 0, nil, providers, time.Now()); errSave != nil {
-			t.Fatal(errSave)
-		}
-		return s.pick(id, session, "gpt-5", c)
-	}
-	if r := pick(nil, "", cands); r.Handled {
-		t.Fatal("an unrestricted key must leave the choice to the host")
-	}
-	if r := s.pick(callerScope("unknown-key-123456"), "", "gpt-5", cands); r.Handled {
-		t.Fatal("an unknown key must leave the choice to the host")
-	}
-	if r := pick([]string{"codex", "claude", "openai-compatible-*"}, "", cands); r.Handled {
-		t.Fatal("when every candidate is allowed the host must choose")
-	}
-	if r := pick([]string{"claude"}, "", cands); !r.Handled || r.AuthID != "claude-1" {
-		t.Fatalf("provider filter: %+v", r)
-	}
-	if r := pick([]string{"codex", "openai-compatible-*"}, "", cands); r.AuthID != "compat-1" {
-		t.Fatalf("the highest priority allowed credential must win: %+v", r)
-	}
-	if r := pick([]string{"gemini"}, "", cands); !r.Handled || !r.Reject {
-		t.Fatalf("no allowed provider must reject: %+v", r)
-	}
-	two := append(cands, schedulerCandidate{ID: "claude-2", Provider: "claude"})
-	first := pick([]string{"claude"}, "session-a", two).AuthID
-	for i := 0; i < 5; i++ {
-		if got := s.pick(id, "session-a", "gpt-5", two).AuthID; got != first {
-			t.Fatalf("a session must keep its credential: %s then %s", first, got)
-		}
-	}
-	seen := map[string]bool{}
-	for i := 0; i < 4; i++ {
-		seen[s.pick(id, "", "gpt-5", two).AuthID] = true
-	}
-	if !seen["claude-1"] || !seen["claude-2"] || seen["codex-1"] {
-		t.Fatalf("requests without a session must rotate over allowed credentials: %v", seen)
 	}
 }

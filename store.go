@@ -6,14 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -66,14 +63,13 @@ type keyEntry struct {
 	CreatedAt  int64  `json:"created_at,omitempty"`  // unix ms
 	ExpiresAt  int64  `json:"expires_at,omitempty"`  // unix ms, 0 = never
 	TokenLimit int64  `json:"token_limit,omitempty"` // input + output tokens, 0 = unlimited
-	// Allow-lists of lower-case patterns (* = any run of characters); empty allows everything.
-	AllowedModels    []string             `json:"allowed_models,omitempty"`
-	AllowedProviders []string             `json:"allowed_providers,omitempty"`
-	Usage            counters             `json:"usage"`
-	LastUsed         int64                `json:"last_used,omitempty"`
-	Models           map[string]*counters `json:"models,omitempty"`
-	Hours            map[int64]*counters  `json:"hours,omitempty"`  // unix hour -> usage
-	Recent           []recentRequest      `json:"recent,omitempty"` // oldest first
+	// Allowed models: lower-case patterns (* = any run of characters); empty allows every model.
+	AllowedModels []string             `json:"allowed_models,omitempty"`
+	Usage         counters             `json:"usage"`
+	LastUsed      int64                `json:"last_used,omitempty"`
+	Models        map[string]*counters `json:"models,omitempty"`
+	Hours         map[int64]*counters  `json:"hours,omitempty"`  // unix hour -> usage
+	Recent        []recentRequest      `json:"recent,omitempty"` // oldest first
 }
 
 // status reports why the key is refused, or "" while it may be used.
@@ -287,64 +283,6 @@ func addTo[K comparable](m map[K]*counters, k K, c counters) map[K]*counters {
 	return m
 }
 
-// schedulerCandidate is the part of pluginapi.SchedulerAuthCandidate the provider filter reads.
-type schedulerCandidate struct {
-	ID       string
-	Provider string
-	Priority int
-}
-
-var (
-	pickTurn      atomic.Uint32
-	seenProviders sync.Map // provider keys met in scheduling, suggested by the page
-)
-
-// pick narrows credential selection to the providers a key may use. It declines, so the host's own
-// scheduler decides with its affinity, weights and strategy, whenever every candidate is allowed.
-func (s *keyStore) pick(scope, session, model string, candidates []schedulerCandidate) pluginapi.SchedulerPickResponse {
-	var providers []string
-	s.mu.RLock()
-	if e := s.keys[scope]; e != nil {
-		providers = e.AllowedProviders
-	}
-	s.mu.RUnlock()
-	var allowed []schedulerCandidate
-	for _, c := range candidates {
-		c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
-		seenProviders.Store(c.Provider, struct{}{})
-		if len(providers) == 0 || matchAny(providers, c.Provider) {
-			allowed = append(allowed, c)
-		}
-	}
-	switch {
-	case len(allowed) == len(candidates):
-		return pluginapi.SchedulerPickResponse{}
-	case len(allowed) == 0:
-		return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectCode: "provider_not_allowed",
-			RejectReason: fmt.Sprintf("This API key may only use providers %s, and none of them can serve model %q now.", strings.Join(providers, ", "), model)}
-	}
-	best := allowed[0].Priority
-	for _, c := range allowed {
-		best = max(best, c.Priority)
-	}
-	var top []schedulerCandidate
-	for _, c := range allowed {
-		if c.Priority == best {
-			top = append(top, c)
-		}
-	}
-	sort.Slice(top, func(i, j int) bool { return top[i].ID < top[j].ID })
-	// ponytail: a session keeps its credential by hash (prompt caches stay warm), others rotate;
-	// the host's weights and cooldown history are not consulted for this narrowed set.
-	turn := pickTurn.Add(1)
-	if session != "" {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(session))
-		turn = h.Sum32()
-	}
-	return pluginapi.SchedulerPickResponse{Handled: true, AuthID: top[turn%uint32(len(top))].ID}
-}
-
 // modelAllowed reports whether a key limited to patterns may run the client-requested or the resolved
 // model; either may match, so aliases work. An empty list allows every model.
 func modelAllowed(patterns []string, models ...string) bool {
@@ -394,7 +332,7 @@ func matchPattern(pattern, s string) bool {
 }
 
 // save creates or updates the limits of a key; its usage is kept.
-func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, models, providers []string, now time.Time) error {
+func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, models []string, now time.Time) error {
 	s.mu.Lock()
 	e := s.keys[id]
 	if e == nil {
@@ -404,7 +342,7 @@ func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, mo
 	if masked != "" {
 		e.Masked = masked
 	}
-	e.Name, e.ExpiresAt, e.TokenLimit, e.AllowedModels, e.AllowedProviders = name, expiresAt, tokenLimit, models, providers
+	e.Name, e.ExpiresAt, e.TokenLimit, e.AllowedModels = name, expiresAt, tokenLimit, models
 	s.touch()
 	s.mu.Unlock()
 	return s.commit()
