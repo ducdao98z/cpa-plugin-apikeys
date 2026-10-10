@@ -14,7 +14,9 @@ used.
 - **Models:** an optional allow-list of patterns (`*` matches any text, e.g. `gpt-5*`, `claude-sonnet-*`), matched
   case-insensitively against the requested model or the model its alias resolves to. Other models get HTTP 403
   (`model_not_allowed`).
-- **Usage:** per key totals, last 30 days by day, by model, and the last 20 requests.
+- **Usage:** per key totals, last 30 days by day, by model, and its requests. With the
+  [Usage Analytics](https://github.com/ducdao98z/cpa-plugin-usage) plugin (0.5.0 or later) the requests page
+  through its history, matched by masked key; without it, the last 20.
 - Follows the panel's theme and reuses its login; key names are shared with the panel (and the
   [Usage Analytics](https://github.com/ducdao98z/cpa-plugin-usage) plugin) in the same browser.
 

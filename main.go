@@ -76,7 +76,7 @@ const (
 )
 
 // pluginVersion is set from the release tag with -ldflags "-X main.pluginVersion=...".
-var pluginVersion = "0.4.0"
+var pluginVersion = "0.4.1"
 
 var store = &keyStore{keys: map[string]*keyEntry{}}
 

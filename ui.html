@@ -204,6 +204,8 @@ select.input { width: auto; padding-right: 34px; appearance: none; cursor: point
 .specLabel { flex: none; color: var(--text-secondary); font-size: 13px; }
 .specValue { min-width: 0; color: var(--text-primary); font-size: 13px; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
 .block { display: flex; flex-direction: column; gap: 10px; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; color: var(--text-secondary); font-size: 12.5px; }
+.pager b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
 /* the panel's floating toolbar covers the top right of this frame */
 .embedded .sheet { padding-top: 76px; }
 .embedded .closeBtn { top: 90px; }
@@ -269,11 +271,15 @@ const SCOPE_PREFIX = "cli-proxy-api:caller-scope:v1\u0000";
 const POLL_MS = 15000;
 const DAY = 86400000;
 const SOON = 7 * DAY;
+const USAGE_DETAILS = "/v0/management/usage/details"; // request history of the Usage Analytics plugin
+const REQUESTS_PAGE = 20;
 const EMBEDDED = (() => { try { return window.parent !== window; } catch { return true; } })();
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const EXPIRY_PRESETS = [["never", "Never"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["date", "Date"]];
 const UNITS = [[1e9, "B"], [1e6, "M"], [1e3, "K"], [1, "tokens"]];
 const ICONS = {
+  chevronLeft: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
+  chevronRight: "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   plus: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
   copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
@@ -364,6 +370,7 @@ const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 const tokensOf = c => (c ? (c.input || 0) + (c.output || 0) : 0);
 const dateFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" });
 const dateTimeFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const secondsFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 function fmtTokens(n) {
   n = n || 0;
@@ -970,7 +977,6 @@ function usageDetail(r, d, close) {
     spec("Last used", d.last_used ? dateTimeFmt.format(d.last_used) : "Never"),
     spec("Tracked since", d.created_at ? dateFmt.format(d.created_at) : "—"));
   const models = Object.entries(d.models || {}).sort((a, b) => tokensOf(b[1]) - tokensOf(a[1]));
-  const recent = (d.recent || []).slice().reverse();
   const table = (cols, bodyRows) => h("div", { class: "tableWrap xscroll" }, h("table", { class: "table" },
     h("thead", {}, h("tr", {}, cols.map(([t, c]) => h("th", { class: c || "" }, t)))), h("tbody", {}, bodyRows)));
   return [
@@ -983,12 +989,44 @@ function usageDetail(r, d, close) {
       table([["Model"], ["Requests", "r"], ["Input", "r"], ["Output", "r"], ["Tokens", "r"]], models.length
         ? models.map(([m, c]) => h("tr", {}, td(m, "mono"), td(fmt(c.requests), "r num"), td(fmt(c.input), "r num"), td(fmt(c.output), "r num"), td(fmt(tokensOf(c)), "r num")))
         : h("tr", {}, td("No requests since the last reset.", "empty", { colspan: 5 })))),
-    h("div", { class: "block" }, h("span", { class: "subTitle" }, "Recent requests"),
-      table([["Time"], ["Model"], ["Input", "r"], ["Output", "r"], ["Latency", "r"], ["Status"]], recent.length
-        ? recent.map(q => h("tr", {}, td(dateTimeFmt.format(q.ts), "soft num"), td(q.model, "mono"), td(fmt(q.input), "r num"), td(fmt(q.output), "r num"),
-            td(q.latency_ms ? fmt(q.latency_ms) + " ms" : "—", "r num soft"), td(h("span", { class: "pill" + (q.failed ? " bad" : "") }, q.failed ? "Failed" + (q.status ? " " + q.status : "") : "OK"))))
-        : h("tr", {}, td("No requests since the last reset.", "empty", { colspan: 6 })))),
+    requestsBlock(r, d, table),
   ];
+}
+// Requests made with the key, newest first. With the Usage Analytics plugin (0.5.0 or later: earlier versions
+// ignore apiKey and answer without a snapshot) they page through its history, which keeps masked keys only, so
+// keys sharing their first 8 and last 4 characters show together. Without it, or before it has seen the key,
+// the block shows the 20 newest requests this plugin keeps.
+function requestsBlock(r, d, table) {
+  const block = h("div", { class: "block" });
+  const show = (items, footer) => block.replaceChildren(h("span", { class: "subTitle" }, "Recent requests"),
+    table([["Time"], ["Model"], ["Input", "r"], ["Output", "r"], ["Latency", "r"], ["Status"]], items.length
+      ? items.map(q => h("tr", {}, td(secondsFmt.format(q.ts), "soft num"), td(q.model, "mono"), td(fmt(q.input), "r num"), td(fmt(q.output), "r num"),
+          td(q.latency_ms ? fmt(q.latency_ms) + " ms" : "—", "r num soft"), td(h("span", { class: "pill" + (q.failed ? " bad" : "") }, q.failed ? "Failed" + (q.status ? " " + q.status : "") : "OK"))))
+      : h("tr", {}, td("No requests since the last reset.", "empty", { colspan: 6 }))),
+    footer);
+  show((d.recent || []).slice().sort((a, b) => b.ts - a.ts));
+  const masked = r.key ? maskKey(r.key) : r.e && r.e.masked;
+  let snapshot = 0, seq = 0;
+  const load = async page => {
+    const mine = ++seq;
+    let res;
+    try {
+      // Later pages keep the first page's snapshot, so requests arriving meanwhile do not shift them.
+      res = await call("GET", USAGE_DETAILS + "?" + new URLSearchParams({ apiKey: masked, page, pageSize: REQUESTS_PAGE, ...(page > 1 && { snapshot }) }));
+    } catch { return; } // no Usage Analytics plugin
+    const p = res && res.pagination;
+    if (mine !== seq || !p || !p.snapshot || !p.totalItems) return;
+    snapshot = p.snapshot;
+    show(res.details.map(q => ({ ...q, model: q.alias || q.model })), pager(p, load));
+  };
+  if (masked) load(1);
+  return block;
+}
+function pager({ page, pageSize, totalItems, totalPages }, go) {
+  const btn = (to, name, label) => h("button", { type: "button", class: "btn sm", disabled: to < 1 || to > totalPages, "aria-label": label, onclick: () => go(to) }, icon(name, 16));
+  return h("div", { class: "pager" },
+    h("span", {}, "Showing ", h("b", {}, fmt((page - 1) * pageSize + 1)), "–", h("b", {}, fmt(Math.min(page * pageSize, totalItems))), " of ", h("b", {}, fmt(totalItems)), " from Usage Analytics"),
+    totalPages > 1 ? h("div", { class: "row" }, btn(page - 1, "chevronLeft", "Previous page"), h("span", {}, `Page ${fmt(page)} of ${fmt(totalPages)}`), btn(page + 1, "chevronRight", "Next page")) : null);
 }
 // Hourly buckets (unix hours) summed into the viewer's last 30 local days.
 function dailyBars(hours, now) {
