@@ -72,11 +72,11 @@ const (
 	pluginIdentifier = "apikeys"
 	displayName      = "API Key Manager" // plugin name and PLUGINS menu label in the panel
 	repositoryURL    = "https://github.com/ducdao98z/cpa-plugin-apikeys"
-	defaultDataFile  = "plugins/apikeys.json"
+	defaultDataFile  = "plugins/apikeys.db"
 )
 
 // pluginVersion is set from the release tag with -ldflags "-X main.pluginVersion=...".
-var pluginVersion = "0.3.0"
+var pluginVersion = "0.4.0"
 
 var store = &keyStore{keys: map[string]*keyEntry{}}
 
@@ -155,7 +155,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() { flushStore() }
+func cliproxyPluginShutdown() { store.close() }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -165,7 +165,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		return okEnvelope(pluginRegistration())
 	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
-		flushStore()
+		store.close()
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodRequestInterceptBefore:
 		var req interceptRequest
@@ -222,16 +222,10 @@ func configure(raw []byte) error {
 		path = defaultDataFile
 	}
 	if errOpen := store.open(path); errOpen != nil {
-		// Limits still apply to keys saved from now on, but nothing is written until the file is fixed.
+		// Limits still apply to keys saved from now on, but nothing is written until the database is fixed.
 		hostLog("error", "apikeys: "+errOpen.Error())
 	}
 	return nil
-}
-
-func flushStore() {
-	if errFlush := store.flush(); errFlush != nil {
-		hostLog("warn", "apikeys: "+errFlush.Error())
-	}
 }
 
 func pluginRegistration() registration {
@@ -243,7 +237,7 @@ func pluginRegistration() registration {
 			Author:           "ducdao98z",
 			GitHubRepository: repositoryURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "data-file", Type: pluginapi.ConfigFieldTypeString, Description: "Key limits and usage file (JSON). Default: " + defaultDataFile + " (relative to the CLIProxyAPI working directory)."},
+				{Name: "data-file", Type: pluginapi.ConfigFieldTypeString, Description: "Key limits and usage database (SQLite). Default: " + defaultDataFile + " (relative to the CLIProxyAPI working directory); a .json data file of the same name (before 0.4.0) is imported once."},
 			},
 		},
 		Capabilities: registrationCapability{

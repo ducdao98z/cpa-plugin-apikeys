@@ -51,8 +51,12 @@ plugins:
   configs:
     apikeys:
       enabled: true
-      data-file: "plugins/apikeys.json" # optional, this is the default (relative to the working directory)
+      data-file: "plugins/apikeys.db" # optional, this is the default (relative to the working directory)
 ```
+
+Versions before 0.4.0 kept everything in `plugins/apikeys.json`. On first start, 0.4.0 imports that file into the
+database (keys the database already has keep their data) and keeps it as `apikeys.json.imported`; a `data-file`
+that still names the `.json` file means the `.db` next to it.
 
 ## Open
 
@@ -61,10 +65,12 @@ plugins:
 ## How it works
 
 - Keys are identified by their caller scope, the SHA-256 that CLIProxyAPI attaches to every request as
-  `caller_scope`. The plugin never sees or stores a raw key; its file holds limits, the masked key and usage.
+  `caller_scope`. The plugin never sees or stores a raw key; its database holds limits, the masked key and usage.
 - `request.intercept_before` refuses requests of expired or exhausted keys and models off the list; `usage.handle`
   counts tokens.
-- The data file is rewritten at most every 5 s while requests arrive, and at once when a key changes.
+- `data-file` is a SQLite database (WAL mode, pure-Go driver, so no C SQLite is needed) with the tables `keys`,
+  `key_models`, `key_hours` and `key_recent`. Every change is written at once; the limit check reads a copy in
+  memory. The database keeps every hourly bucket, while the page loads the last 31 days.
 
 ### Management API
 

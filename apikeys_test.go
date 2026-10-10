@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -66,32 +69,132 @@ func TestLimits(t *testing.T) {
 }
 
 func TestPersistence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "apikeys.json")
+	path := filepath.Join(t.TempDir(), "apikeys.db")
 	now := time.Now()
 	s := &keyStore{keys: map[string]*keyEntry{}}
 	if errOpen := s.open(path); errOpen != nil {
 		t.Fatal(errOpen)
 	}
-	id := callerScope(testKey)
+	id, other := callerScope(testKey), callerScope("sk-other-0123456789")
 	if errSave := s.save(id, maskKey(testKey), "alice", 0, 5000, []string{"gpt-5*"}, now); errSave != nil {
 		t.Fatal(errSave)
 	}
-	use(s, testKey, 100, 50, now)
-	use(s, testKey, 1, 1, now.Add(-40*24*time.Hour)) // an older hour bucket is pruned on the next new hour
-	use(s, testKey, 1, 1, now.Add(time.Hour))
-	if errFlush := s.flush(); errFlush != nil {
-		t.Fatal(errFlush)
+	for _, name := range []string{path, path + "-wal"} {
+		if info, errStat := os.Stat(name); errStat != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+			t.Fatalf("%s must be owner-only: %v %v", name, info, errStat)
+		}
 	}
+	use(s, testKey, 100, 50, now)
+	use(s, testKey, 1, 1, now.Add(-40*24*time.Hour)) // kept on disk, not loaded: older than hourRetention
+	use(s, testKey, 1, 1, now.Add(time.Hour))
+	for i := 0; i < recentLimit+5; i++ {
+		use(s, "sk-other-0123456789", 1, 0, now)
+	}
+	s.close() // as on quiesce: a register reopens the database
+	if errOpen := s.open(path); errOpen != nil {
+		t.Fatal(errOpen)
+	}
+	e := s.keys[id]
+	if e == nil || e.Name != "alice" || e.TokenLimit != 5000 || e.Usage.Requests != 3 || e.Usage.Input != 102 || e.Usage.Output != 52 ||
+		len(e.AllowedModels) != 1 || e.Models["gpt-5"].Requests != 3 || len(e.Recent) != 3 || e.Recent[2].Input != 1 {
+		t.Fatalf("reloaded entry: %+v", e)
+	}
+	if len(e.Hours) != 2 {
+		t.Fatalf("hour buckets older than %d hours must not be loaded, got %d buckets", hourRetention, len(e.Hours))
+	}
+	var stored int
+	if errCount := s.db.QueryRow("SELECT COUNT(*) FROM key_hours WHERE scope = ?", id).Scan(&stored); errCount != nil || stored != 3 {
+		t.Fatalf("the database keeps every hour bucket: %d, %v", stored, errCount)
+	}
+	if o := s.keys[other]; o == nil || o.Usage.Requests != recentLimit+5 || len(o.Recent) != recentLimit || o.Masked != maskKey("sk-other-0123456789") {
+		t.Fatalf("unmanaged key: %+v", o)
+	}
+
+	if errReset := s.resetUsage(id); errReset != nil {
+		t.Fatal(errReset)
+	}
+	if errRemove := s.remove(other); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	s.close()
 	reopened := &keyStore{keys: map[string]*keyEntry{}}
 	if errOpen := reopened.open(path); errOpen != nil {
 		t.Fatal(errOpen)
 	}
-	e := reopened.keys[id]
-	if e == nil || e.Name != "alice" || e.TokenLimit != 5000 || e.Usage.Requests != 3 || e.Usage.Input != 102 || len(e.AllowedModels) != 1 {
-		t.Fatalf("reloaded entry: %+v", e)
+	defer reopened.close()
+	if e = reopened.keys[id]; e == nil || e.Usage != (counters{}) || e.LastUsed != 0 || e.Models != nil || e.Hours != nil || e.Recent != nil || e.TokenLimit != 5000 {
+		t.Fatalf("reset entry: %+v", e)
 	}
-	if len(e.Hours) != 2 {
-		t.Fatalf("hour buckets older than %d hours must be pruned, got %d buckets", hourRetention, len(e.Hours))
+	if reopened.keys[other] != nil {
+		t.Fatal("removed key came back")
+	}
+}
+
+func TestImportJSON(t *testing.T) {
+	dir := t.TempDir()
+	db, legacy := filepath.Join(dir, "apikeys.db"), filepath.Join(dir, "apikeys.json")
+	id, kept := callerScope(testKey), callerScope("sk-kept-0123456789")
+	now := time.Now()
+	s := &keyStore{keys: map[string]*keyEntry{}}
+	if errOpen := s.open(db); errOpen != nil {
+		t.Fatal(errOpen)
+	}
+	if errSave := s.save(kept, "", "from the database", 0, 0, nil, now); errSave != nil {
+		t.Fatal(errSave)
+	}
+	s.close()
+	hour := now.Unix() / 3600
+	raw, _ := json.Marshal(storeFile{Keys: map[string]*keyEntry{
+		id: {Masked: maskKey(testKey), Name: "alice", TokenLimit: 900, AllowedModels: []string{"gpt-5*"}, LastUsed: 2,
+			Usage:  counters{Requests: 2, Input: 30, Output: 10},
+			Models: map[string]*counters{"gpt-5": {Requests: 2, Input: 30, Output: 10}},
+			Hours:  map[int64]*counters{hour: {Requests: 2, Input: 30, Output: 10}},
+			Recent: []recentRequest{{TS: 1, Model: "gpt-5", Input: 10}, {TS: 2, Model: "gpt-5", Input: 20, Failed: true, Status: 500}}},
+		kept: {Name: "from the file"},
+	}})
+	if errWrite := os.WriteFile(legacy, raw, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	s = &keyStore{keys: map[string]*keyEntry{}}
+	if errOpen := s.open(legacy); errOpen != nil { // configs before 0.4.0 name the .json file
+		t.Fatal(errOpen)
+	}
+	defer s.close()
+	if _, errStat := os.Stat(legacy); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatal("data file left in place, so it would be imported again")
+	}
+	if _, errStat := os.Stat(legacy + ".imported"); errStat != nil {
+		t.Fatalf("data file not kept: %v", errStat)
+	}
+	e := s.keys[id]
+	if e == nil || e.Name != "alice" || e.TokenLimit != 900 || e.AllowedModels[0] != "gpt-5*" || e.Usage.Input != 30 || e.LastUsed != 2 ||
+		e.Models["gpt-5"].Requests != 2 || e.Hours[hour].Output != 10 || len(e.Recent) != 2 || !e.Recent[1].Failed || e.Recent[1].Status != 500 {
+		t.Fatalf("imported entry: %+v", e)
+	}
+	if s.keys[kept].Name != "from the database" {
+		t.Fatal("the import overwrote a key the database already had")
+	}
+}
+
+func TestUnreadableDataIsNotOverwritten(t *testing.T) {
+	legacy := filepath.Join(t.TempDir(), "apikeys.json")
+	if errWrite := os.WriteFile(legacy, []byte(`{"keys":`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	s := &keyStore{keys: map[string]*keyEntry{}}
+	if errOpen := s.open(legacy); errOpen == nil {
+		t.Fatal("a torn data file was accepted")
+	}
+	id := callerScope(testKey)
+	if errSave := s.save(id, "", "", 1, 0, nil, time.Now()); errSave == nil || !strings.Contains(errSave.Error(), "not saved") {
+		t.Fatalf("save must report it was not stored: %v", errSave)
+	}
+	if status, _ := s.rejection(id, "gpt-5", "gpt-5", time.Now()); status != http.StatusForbidden {
+		t.Fatal("a limit saved while the data is unreadable must still apply until restart")
+	}
+	if raw, _ := os.ReadFile(legacy); string(raw) != `{"keys":` {
+		t.Fatalf("data file changed: %s", raw)
 	}
 }
 
