@@ -59,6 +59,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -76,7 +77,7 @@ const (
 )
 
 // pluginVersion is set from the release tag with -ldflags "-X main.pluginVersion=...".
-var pluginVersion = "0.4.1"
+var pluginVersion = "0.5.0"
 
 var store = &keyStore{keys: map[string]*keyEntry{}}
 
@@ -106,6 +107,7 @@ type interceptRequest struct {
 	RequestedModel string
 	Metadata       struct {
 		CallerScope string `json:"caller_scope"` // sha256 of the client API key, see callerScope
+		RequestPath string `json:"request_path"` // route, e.g. /v1/messages/count_tokens
 	}
 }
 
@@ -172,14 +174,24 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, errUnmarshal
 		}
-		status, body := store.rejection(req.Metadata.CallerScope, req.RequestedModel, req.Model, time.Now())
+		now := time.Now()
+		status, body := store.rejection(req.Metadata.CallerScope, req.RequestedModel, req.Model, now)
+		headers := http.Header{"Content-Type": []string{"application/json"}}
+		// Last, so refused requests take no slot. Token counting has no RPM limit, as at Anthropic; Gemini's
+		// countTokens shares its route with generateContent, so it still counts.
+		if status == 0 && !strings.HasSuffix(req.Metadata.RequestPath, "/count_tokens") {
+			if retry, rateBody := store.throttle(req.Metadata.CallerScope, now); retry > 0 {
+				status, body = http.StatusTooManyRequests, rateBody
+				headers.Set("Retry-After", strconv.FormatInt(retry, 10))
+			}
+		}
 		if status == 0 {
 			return okEnvelope(struct{}{})
 		}
 		return okEnvelope(pluginapi.RequestInterceptResponse{
 			Terminate:       true,
 			StatusCode:      status,
-			ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			ResponseHeaders: headers,
 			ResponseBody:    body,
 		})
 	case pluginabi.MethodRequestInterceptAfter:

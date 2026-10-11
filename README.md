@@ -1,8 +1,8 @@
 # API Key Manager plugin for CLIProxyAPI
 
 Manage the client API keys of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (`access.api-keys`, the
-panel's Client API Keys) with expiry dates, token limits and the models each key may use, and see what each key
-used.
+panel's Client API Keys) with expiry dates, token limits, requests-per-minute limits and the models each key may
+use, and see what each key used.
 
 - **Keys:** add (generated like the panel's Generate), rename, set limits, delete. Keys are written to the core
   config through the Management API, so the panel and this page always show the same list.
@@ -11,6 +11,10 @@ used.
 - **Token limit:** input + output tokens (cached input included). Once used, model requests get HTTP 403
   (`token_quota_exceeded`) until the limit is raised or the usage is reset. The check runs before each request,
   so requests already running can overshoot it.
+- **Requests per minute:** at most N model requests in any 60 seconds (a sliding window). More get HTTP 429
+  (`rate_limit_exceeded`) with `Retry-After`; refused requests take no slot. Requests count when they start, whether
+  they succeed or not. `/v1/messages/count_tokens` is not counted (Gemini's `countTokens` shares its route with
+  `generateContent`, so it is). The window lives in memory and starts empty after a restart.
 - **Models:** an optional allow-list of patterns (`*` matches any text, e.g. `gpt-5*`, `claude-sonnet-*`), matched
   case-insensitively against the requested model or the model its alias resolves to. Other models get HTTP 403
   (`model_not_allowed`).
@@ -68,8 +72,8 @@ that still names the `.json` file means the `.db` next to it.
 
 - Keys are identified by their caller scope, the SHA-256 that CLIProxyAPI attaches to every request as
   `caller_scope`. The plugin never sees or stores a raw key; its database holds limits, the masked key and usage.
-- `request.intercept_before` refuses requests of expired or exhausted keys and models off the list; `usage.handle`
-  counts tokens.
+- `request.intercept_before` refuses requests of expired or exhausted keys and models off the list, then admits the
+  request under the key's RPM limit; `usage.handle` counts tokens.
 - `data-file` is a SQLite database (WAL mode, pure-Go driver, so no C SQLite is needed) with the tables `keys`,
   `key_models`, `key_hours` and `key_recent`. Every change is written at once; the limit check reads a copy in
   memory. The database keeps every hourly bucket, while the page loads the last 31 days.
@@ -83,7 +87,7 @@ All routes need the management key. `id` is the key's caller scope:
 |---|---|
 | `GET /v0/management/apikeys` | Limits, usage totals and status of every known key |
 | `GET /v0/management/apikeys/detail?id=` | One key with usage by model, by hour (31 days) and recent requests |
-| `POST /v0/management/apikeys/save` | `{id, masked, name, expires_at, token_limit, allowed_models}` (unix ms, tokens, patterns; 0 or empty = none) |
+| `POST /v0/management/apikeys/save` | `{id, masked, name, expires_at, token_limit, rpm_limit, allowed_models}` (unix ms, tokens, requests per minute, patterns; 0 or empty = none) |
 | `POST /v0/management/apikeys/delete` | `{id}`: forget limits and usage |
 | `POST /v0/management/apikeys/reset` | `{id}`: zero the usage, restarting the token limit |
 

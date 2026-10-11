@@ -23,6 +23,7 @@ const (
 	hourRetention = 31 * 24 // hourly buckets kept in memory per key, for the page's 30 days; the database keeps all
 	statusExpired = "expired"
 	statusQuota   = "quota"
+	rpmWindow     = 60_000 // ms: an RPM limit counts the requests admitted in the last minute
 )
 
 // counters sums finished requests. Input includes cached tokens and output includes reasoning,
@@ -74,6 +75,7 @@ type keyEntry struct {
 	CreatedAt  int64  `json:"created_at,omitempty"`  // unix ms
 	ExpiresAt  int64  `json:"expires_at,omitempty"`  // unix ms, 0 = never
 	TokenLimit int64  `json:"token_limit,omitempty"` // input + output tokens, 0 = unlimited
+	RPMLimit   int64  `json:"rpm_limit,omitempty"`   // model requests per minute, 0 = unlimited
 	// Allowed models: lower-case patterns (* = any run of characters); empty allows every model.
 	AllowedModels []string             `json:"allowed_models,omitempty"`
 	Usage         counters             `json:"usage"`
@@ -81,6 +83,8 @@ type keyEntry struct {
 	Models        map[string]*counters `json:"models,omitempty"`
 	Hours         map[int64]*counters  `json:"hours,omitempty"`  // unix hour -> usage
 	Recent        []recentRequest      `json:"recent,omitempty"` // oldest first
+
+	admitted []int64 // unix ms of the requests admitted in the last rpmWindow, oldest first; guarded by keyStore.rateMu
 }
 
 // status reports why the key is refused, or "" while it may be used.
@@ -100,7 +104,7 @@ type storeFile struct {
 }
 
 const (
-	keyColumns     = "scope, masked, name, created_at, expires_at, token_limit, allowed_models"
+	keyColumns     = "scope, masked, name, created_at, expires_at, token_limit, rpm_limit, allowed_models"
 	counterColumns = "requests, failed, input, output, cached, reasoning"
 	recentColumns  = "ts, model, provider, input, output, latency_ms, status, failed"
 	counterDefs    = "requests INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, input INTEGER NOT NULL DEFAULT 0, " +
@@ -119,6 +123,7 @@ CREATE TABLE IF NOT EXISTS keys (
 	created_at     INTEGER NOT NULL DEFAULT 0,
 	expires_at     INTEGER NOT NULL DEFAULT 0,
 	token_limit    INTEGER NOT NULL DEFAULT 0,
+	rpm_limit      INTEGER NOT NULL DEFAULT 0,
 	allowed_models TEXT    NOT NULL DEFAULT '',
 	last_used      INTEGER NOT NULL DEFAULT 0,
 	` + counterDefs + `
@@ -143,6 +148,7 @@ CREATE INDEX IF NOT EXISTS key_recent_scope ON key_recent (scope);`
 type keyStore struct {
 	mu      sync.RWMutex // guards keys and their entries; never held across database calls
 	writeMu sync.Mutex   // orders changes, so they reach the database in the order they reached memory
+	rateMu  sync.Mutex   // guards the entries' admitted times; taken inside mu
 	path    string
 	db      *sql.DB // nil while closed or unusable: changes then stay in memory
 	openErr error
@@ -204,6 +210,16 @@ func openDB(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, errSchema
 	}
+	// Databases of 0.4.x have no rpm_limit column.
+	var hasRPM bool
+	errMigrate := db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('keys') WHERE name = 'rpm_limit'").Scan(&hasRPM)
+	if errMigrate == nil && !hasRPM {
+		_, errMigrate = db.Exec("ALTER TABLE keys ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0")
+	}
+	if errMigrate != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("add rpm_limit: %w", errMigrate)
+	}
 	return db, nil
 }
 
@@ -228,7 +244,7 @@ func readKeys(db *sql.DB, now time.Time) (map[string]*keyEntry, error) {
 	errKeys := each(db, "SELECT "+keyColumns+", last_used, "+counterColumns+" FROM keys", func(rows *sql.Rows) error {
 		var id, models string
 		e := &keyEntry{}
-		if errScan := rows.Scan(append([]any{&id, &e.Masked, &e.Name, &e.CreatedAt, &e.ExpiresAt, &e.TokenLimit, &models, &e.LastUsed}, e.Usage.fields()...)...); errScan != nil {
+		if errScan := rows.Scan(append([]any{&id, &e.Masked, &e.Name, &e.CreatedAt, &e.ExpiresAt, &e.TokenLimit, &e.RPMLimit, &models, &e.LastUsed}, e.Usage.fields()...)...); errScan != nil {
 			return errScan
 		}
 		keys[id] = e
@@ -326,7 +342,7 @@ func importJSON(db *sql.DB, path string) error {
 			continue
 		}
 		res, errKey := insert(tx, "keys", keyColumns+", last_used, "+counterColumns, "ON CONFLICT (scope) DO NOTHING",
-			append([]any{id, e.Masked, e.Name, e.CreatedAt, e.ExpiresAt, e.TokenLimit, encodeModels(e.AllowedModels), e.LastUsed}, e.Usage.fields()...)...)
+			append([]any{id, e.Masked, e.Name, e.CreatedAt, e.ExpiresAt, e.TokenLimit, e.RPMLimit, encodeModels(e.AllowedModels), e.LastUsed}, e.Usage.fields()...)...)
 		if errKey != nil {
 			return errKey
 		}
@@ -471,12 +487,45 @@ func (s *keyStore) rejection(scope, requested, model string, now time.Time) (int
 	if code == "" {
 		return 0, nil
 	}
-	// One body that Anthropic- and OpenAI-style clients both read. 403, not 429: a retry cannot succeed.
+	// 403, not 429: a retry cannot succeed.
+	return http.StatusForbidden, errorBody("permission_error", code, message)
+}
+
+// throttle admits a request under its key's RPM limit: at most RPMLimit requests in any rpmWindow. A
+// refused request takes no slot; it returns the seconds until one frees up and the body that refuses it.
+func (s *keyStore) throttle(scope string, now time.Time) (int64, []byte) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e := s.keys[scope]
+	if e == nil || e.RPMLimit <= 0 {
+		return 0, nil
+	}
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	ms := now.UnixMilli()
+	i := 0
+	for i < len(e.admitted) && e.admitted[i] <= ms-rpmWindow {
+		i++
+	}
+	e.admitted = e.admitted[i:]
+	if n := int64(len(e.admitted)); n >= e.RPMLimit {
+		// The request fits once all but RPMLimit-1 of the admitted ones have left the window.
+		wait := e.admitted[n-e.RPMLimit] + rpmWindow - ms
+		retry := (wait + 999) / 1000
+		return retry, errorBody("rate_limit_error", "rate_limit_exceeded",
+			fmt.Sprintf("This API key is limited to %d requests per minute. Retry in %d s.", e.RPMLimit, retry))
+	}
+	e.admitted = append(e.admitted, ms)
+	return 0, nil
+}
+
+// errorBody is one error body that Anthropic- and OpenAI-style clients both read.
+func errorBody(typ, code, message string) []byte {
 	body, _ := json.Marshal(map[string]any{
 		"type":  "error",
-		"error": map[string]string{"type": "permission_error", "code": code, "message": message},
+		"error": map[string]string{"type": typ, "code": code, "message": message},
 	})
-	return http.StatusForbidden, body
+	return body
 }
 
 // record adds one finished model call to its key.
@@ -590,7 +639,7 @@ func matchPattern(pattern, s string) bool {
 }
 
 // save creates or updates the limits of a key; its usage is kept.
-func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, models []string, now time.Time) error {
+func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit, rpmLimit int64, models []string, now time.Time) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
@@ -602,12 +651,12 @@ func (s *keyStore) save(id, masked, name string, expiresAt, tokenLimit int64, mo
 	if masked != "" {
 		e.Masked = masked
 	}
-	e.Name, e.ExpiresAt, e.TokenLimit, e.AllowedModels = name, expiresAt, tokenLimit, models
+	e.Name, e.ExpiresAt, e.TokenLimit, e.RPMLimit, e.AllowedModels = name, expiresAt, tokenLimit, rpmLimit, models
 	s.mu.Unlock()
 	return s.commit(func(tx *sql.Tx) error {
 		_, errSave := insert(tx, "keys", keyColumns, "ON CONFLICT (scope) DO UPDATE SET masked = excluded.masked, name = excluded.name, "+
-			"expires_at = excluded.expires_at, token_limit = excluded.token_limit, allowed_models = excluded.allowed_models",
-			id, e.Masked, e.Name, e.CreatedAt, e.ExpiresAt, e.TokenLimit, encodeModels(e.AllowedModels))
+			"expires_at = excluded.expires_at, token_limit = excluded.token_limit, rpm_limit = excluded.rpm_limit, allowed_models = excluded.allowed_models",
+			id, e.Masked, e.Name, e.CreatedAt, e.ExpiresAt, e.TokenLimit, e.RPMLimit, encodeModels(e.AllowedModels))
 		return errSave
 	})
 }

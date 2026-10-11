@@ -618,7 +618,7 @@ function build() {
       h("div", { class: "sectionHead" }, h("div", { class: "sectionCopy" },
         h("span", { class: "eyebrow" }, "access.api-keys"),
         h("h2", { class: "sectionTitle" }, "Client API keys"),
-        h("p", { class: "sectionDescription" }, "The same keys as the panel's Client API Keys. Model requests with an expired key, a key over its token limit or a model outside the key's list are refused with HTTP 403. Keys without limits work as before. Usage counts input + output tokens from the moment this plugin was installed."))),
+        h("p", { class: "sectionDescription" }, "The same keys as the panel's Client API Keys. Model requests with an expired key, a key over its token limit or a model outside the key's list are refused with HTTP 403; requests over a key's RPM limit get HTTP 429 with Retry-After. Keys without limits work as before. Usage counts input + output tokens from the moment this plugin was installed."))),
       ui.table));
   document.getElementById("app").replaceChildren(ui.content);
   render();
@@ -682,8 +682,8 @@ function render() {
   renderTable(list);
 }
 function renderTable(list) {
-  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["Models"], ["Requests", "r"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
-  const empty = text => ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, h("tr", {}, td(text, "empty", { colspan: 7 })))));
+  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["RPM", "r"], ["Models"], ["Requests", "r"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
+  const empty = text => ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, h("tr", {}, td(text, "empty", { colspan: 8 })))));
   if (!state.loaded) return empty("Loading keys…");
   if (state.error && !list.length) return empty("Could not load keys: " + state.error);
   if (!list.length) return empty("No client API keys yet. Without keys the proxy accepts requests without an API key.");
@@ -697,6 +697,7 @@ function renderTable(list) {
       td(h("span", { class: "pill " + tone }, label)),
       td(e && e.expires_at ? [dateFmt.format(e.expires_at), h("span", { class: "sub" }, relative(e.expires_at, state.now))] : h("span", { class: "muted" }, "Never")),
       td(usageCell(e)),
+      td(e && e.rpm_limit ? fmt(e.rpm_limit) : h("span", { class: "muted" }, "—"), "r num"),
       td(modelsCell(e)),
       td([fmt(e ? e.usage.requests : 0), h("span", { class: "sub" }, fmtTime(e && e.last_used))], "r num"),
       td(h("div", { class: "actions" },
@@ -847,6 +848,16 @@ function openEditor(row) {
   limitInput.addEventListener("input", renderLimit);
   unitSelect.addEventListener("change", renderLimit);
   renderLimit();
+  const rpmInput = h("input", { class: "input", type: "number", min: 0, step: 1, inputmode: "numeric", placeholder: "No limit", value: (e && e.rpm_limit) ? String(e.rpm_limit) : "", "aria-label": "Requests per minute" });
+  const rpmHint = h("p", { class: "hint" });
+  const rpmLimit = () => { const v = rpmInput.value.trim(); return v === "" ? 0 : Number(v); };
+  const renderRpm = () => {
+    const v = rpmLimit();
+    rpmHint.textContent = !Number.isInteger(v) || v < 0 ? "Enter a whole number, or leave it empty for no limit."
+      : !v ? "No limit." : `At most ${fmt(v)} model requests in any 60 seconds. More get HTTP 429 with Retry-After.`;
+  };
+  rpmInput.addEventListener("input", renderRpm);
+  renderRpm();
   const models = tagInput((e && e.allowed_models) || [], "gpt-5*, claude-sonnet-*…", "Allowed models");
   loadModels().then(models.setOptions);
   const error = h("p", { class: "formError", hidden: true });
@@ -857,6 +868,7 @@ function openEditor(row) {
       h("p", { class: "hint" }, isNew ? "Clients send it as a Bearer token, x-api-key or x-goog-api-key, like any client key." : "To change the key itself, delete it and add a new one.")),
     h("div", { class: "field" }, h("label", {}, "Expires"), expiryChoice, dateInput, expiryHint),
     h("div", { class: "field" }, h("label", {}, "Token limit"), h("div", { class: "row" }, limitInput, unitSelect), limitHint),
+    h("div", { class: "field" }, h("label", {}, "Requests per minute"), rpmInput, rpmHint),
     h("div", { class: "field" }, h("label", {}, "Models"), models.el,
       h("p", { class: "hint" }, "Empty allows every model. * matches any text. Other models get HTTP 403.")),
     e ? h("div", { class: "usageNote" }, h("span", {}, "Used ", h("b", {}, fmt(used)), " tokens in ", h("b", {}, fmt(e.usage.requests)), " requests")) : null,
@@ -865,18 +877,19 @@ function openEditor(row) {
   openModal(isNew ? "Add API key" : "Edit API key", body, close => {
     const save = h("button", { type: "button", class: "btn primary", onclick: async () => {
       error.hidden = true;
-      const key = keyInput.value.trim(), name = nameInput.value.trim(), tl = tokenLimit();
+      const key = keyInput.value.trim(), name = nameInput.value.trim(), tl = tokenLimit(), rl = rpmLimit();
       const fail = msg => { error.textContent = msg; error.hidden = false; };
       if (!key) return fail("Please enter an API key.");
       if (!/^[\x21-\x7E]+$/.test(key)) return fail("The API key may only contain visible ASCII characters, without spaces.");
       if (isNew && state.cfgKeys.includes(key)) return fail("This API key already exists. Use Edit to change its limits.");
       if (!Number.isFinite(tl) || tl < 0) return fail("The token limit must be a positive number, or empty for no limit.");
+      if (!Number.isInteger(rl) || rl < 0) return fail("Requests per minute must be a whole number, or empty for no limit.");
       if (f.mode === "date" && !f.expiresAt) return fail("Pick an expiry date.");
       save.disabled = true; save.replaceChildren(spinner(14), "Saving");
       try {
         // Limits first: a new key never exists without them, and a failed config write leaves only an unused entry.
         await call("POST", API + "/save", { id: scopeId(key), masked: maskKey(key), name, expires_at: f.expiresAt, token_limit: tl,
-          allowed_models: models.values() });
+          rpm_limit: rl, allowed_models: models.values() });
         if (isNew) {
           const keys = await coreKeys(); // fresh, so a concurrent edit in the panel is kept
           if (!keys.includes(key)) await writeCoreKeys([...keys, key]);
@@ -965,6 +978,7 @@ function usageDetail(r, d, close) {
   const specs = h("div", { class: "specGrid" },
     spec("Expires", d.expires_at ? `${dateTimeFmt.format(d.expires_at)} (${relative(d.expires_at, now)})` : "Never"),
     spec("Token limit", d.token_limit ? mono(fmt(d.token_limit)) : "No limit"),
+    spec("Requests per minute", d.rpm_limit ? mono(fmt(d.rpm_limit)) : "No limit"),
     spec("Allowed models", (d.allowed_models || []).length ? mono(d.allowed_models.join(", ")) : "All"),
     spec("Tokens used", mono(fmt(used))),
     spec("Remaining", d.token_limit ? mono(fmt(Math.max(0, d.token_limit - used))) : "—"),

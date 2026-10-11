@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestLimits(t *testing.T) {
 	if status, _ := s.rejection(id, "gpt-5", "gpt-5", now); status != 0 {
 		t.Fatal("a key without limits must pass")
 	}
-	if errSave := s.save(id, maskKey(testKey), "alice", 0, 1000, nil, now); errSave != nil {
+	if errSave := s.save(id, maskKey(testKey), "alice", 0, 1000, 0, nil, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	use(s, testKey, 400, 200, now)
@@ -57,7 +59,7 @@ func TestLimits(t *testing.T) {
 	if status, _ := s.rejection(id, "gpt-5", "gpt-5", now); status != 0 {
 		t.Fatal("reset must restart the limit")
 	}
-	if errSave := s.save(id, "", "alice", now.UnixMilli(), 0, nil, now); errSave != nil {
+	if errSave := s.save(id, "", "alice", now.UnixMilli(), 0, 0, nil, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	if status, body := s.rejection(id, "gpt-5", "gpt-5", now); status != http.StatusForbidden || !strings.Contains(string(body), "api_key_expired") {
@@ -76,7 +78,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatal(errOpen)
 	}
 	id, other := callerScope(testKey), callerScope("sk-other-0123456789")
-	if errSave := s.save(id, maskKey(testKey), "alice", 0, 5000, []string{"gpt-5*"}, now); errSave != nil {
+	if errSave := s.save(id, maskKey(testKey), "alice", 0, 5000, 60, []string{"gpt-5*"}, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	for _, name := range []string{path, path + "-wal"} {
@@ -95,7 +97,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatal(errOpen)
 	}
 	e := s.keys[id]
-	if e == nil || e.Name != "alice" || e.TokenLimit != 5000 || e.Usage.Requests != 3 || e.Usage.Input != 102 || e.Usage.Output != 52 ||
+	if e == nil || e.Name != "alice" || e.TokenLimit != 5000 || e.RPMLimit != 60 || e.Usage.Requests != 3 || e.Usage.Input != 102 || e.Usage.Output != 52 ||
 		len(e.AllowedModels) != 1 || e.Models["gpt-5"].Requests != 3 || len(e.Recent) != 3 || e.Recent[2].Input != 1 {
 		t.Fatalf("reloaded entry: %+v", e)
 	}
@@ -139,7 +141,7 @@ func TestImportJSON(t *testing.T) {
 	if errOpen := s.open(db); errOpen != nil {
 		t.Fatal(errOpen)
 	}
-	if errSave := s.save(kept, "", "from the database", 0, 0, nil, now); errSave != nil {
+	if errSave := s.save(kept, "", "from the database", 0, 0, 0, nil, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	s.close()
@@ -187,7 +189,7 @@ func TestUnreadableDataIsNotOverwritten(t *testing.T) {
 		t.Fatal("a torn data file was accepted")
 	}
 	id := callerScope(testKey)
-	if errSave := s.save(id, "", "", 1, 0, nil, time.Now()); errSave == nil || !strings.Contains(errSave.Error(), "not saved") {
+	if errSave := s.save(id, "", "", 1, 0, 0, nil, time.Now()); errSave == nil || !strings.Contains(errSave.Error(), "not saved") {
 		t.Fatalf("save must report it was not stored: %v", errSave)
 	}
 	if status, _ := s.rejection(id, "gpt-5", "gpt-5", time.Now()); status != http.StatusForbidden {
@@ -204,11 +206,15 @@ func TestInterceptEnvelope(t *testing.T) {
 	t.Cleanup(func() { store = saved })
 	store = &keyStore{keys: map[string]*keyEntry{}}
 	id := callerScope(testKey)
-	if errSave := store.save(id, "", "", 1, 0, nil, time.Now()); errSave != nil { // expired in 1970
+	if errSave := store.save(id, "", "", 1, 0, 0, nil, time.Now()); errSave != nil { // expired in 1970
 		t.Fatal(errSave)
 	}
-	call := func(scope string) pluginapi.RequestInterceptResponse {
-		raw, _ := json.Marshal(pluginapi.RequestInterceptRequest{RequestID: "r1", Model: "gpt-5", RequestedModel: "gpt-5", Body: []byte(`{"model":"gpt-5"}`), Metadata: map[string]any{"caller_scope": scope, "request_path": "/v1/chat/completions"}})
+	call := func(scope string, path ...string) pluginapi.RequestInterceptResponse {
+		route := "/v1/chat/completions"
+		if len(path) > 0 {
+			route = path[0]
+		}
+		raw, _ := json.Marshal(pluginapi.RequestInterceptRequest{RequestID: "r1", Model: "gpt-5", RequestedModel: "gpt-5", Body: []byte(`{"model":"gpt-5"}`), Metadata: map[string]any{"caller_scope": scope, "request_path": route}})
 		out, errHandle := handleMethod(pluginabi.MethodRequestInterceptBefore, raw)
 		if errHandle != nil {
 			t.Fatal(errHandle)
@@ -225,6 +231,86 @@ func TestInterceptEnvelope(t *testing.T) {
 	}
 	if resp := call(callerScope("another-key-123456")); resp.Terminate {
 		t.Fatal("unmanaged key was refused")
+	}
+
+	limited := callerScope("sk-limited-0123456789")
+	if errSave := store.save(limited, "", "", 0, 0, 1, nil, time.Now()); errSave != nil {
+		t.Fatal(errSave)
+	}
+	if resp := call(limited); resp.Terminate {
+		t.Fatal("first request of the minute was refused")
+	}
+	if resp := call(limited, "/v1/messages/count_tokens"); resp.Terminate {
+		t.Fatal("token counting must not hit the RPM limit")
+	}
+	resp := call(limited)
+	if retry, _ := strconv.Atoi(resp.ResponseHeaders.Get("Retry-After")); !resp.Terminate || resp.StatusCode != http.StatusTooManyRequests || retry < 1 || retry > 60 ||
+		!strings.Contains(string(resp.ResponseBody), "rate_limit_error") {
+		t.Fatalf("second request of the minute: %+v %s", resp, resp.ResponseBody)
+	}
+}
+
+func TestRPMLimit(t *testing.T) {
+	start := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	s := &keyStore{keys: map[string]*keyEntry{}}
+	id := callerScope(testKey)
+	if errSave := s.save(id, "", "", 0, 0, 3, nil, start); errSave != nil {
+		t.Fatal(errSave)
+	}
+	at := func(d time.Duration) int64 { retry, _ := s.throttle(id, start.Add(d)); return retry }
+	for _, d := range []time.Duration{0, 10 * time.Second, 20 * time.Second} {
+		if retry := at(d); retry != 0 {
+			t.Fatalf("request at +%s refused under the limit (retry %d)", d, retry)
+		}
+	}
+	if retry := at(30 * time.Second); retry != 30 {
+		t.Fatalf("4th request in a minute: retry %d, want 30 (until the first leaves the window)", retry)
+	}
+	if retry := at(59*time.Second + 500*time.Millisecond); retry != 1 {
+		t.Fatalf("retry rounds up to whole seconds: got %d", retry)
+	}
+	if retry := at(time.Minute); retry != 0 {
+		t.Fatal("a slot frees up once the first request is a minute old; refused requests take none")
+	}
+	if retry, body := s.throttle(id, start.Add(time.Minute)); retry != 10 || !strings.Contains(string(body), "rate_limit_exceeded") {
+		t.Fatalf("full window again: retry %d %s", retry, body)
+	}
+	if errSave := s.save(id, "", "", 0, 0, 1, nil, start); errSave != nil { // lowered: 3 admitted, 1 allowed
+		t.Fatal(errSave)
+	}
+	if retry := at(time.Minute + 5*time.Second); retry != 55 {
+		t.Fatalf("lowered limit waits until fewer than the limit remain, here the newest (+60s): retry %d, want 55", retry)
+	}
+	if retry, _ := s.throttle(callerScope("another-key-123456"), start); retry != 0 {
+		t.Fatal("a key without an RPM limit was throttled")
+	}
+}
+
+// Databases of 0.4.x have no rpm_limit column; opening one adds it and keeps the keys.
+func TestMigrateRPMColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "apikeys.db")
+	old := strings.Replace(schema, "rpm_limit      INTEGER NOT NULL DEFAULT 0,\n\t", "", 1)
+	if old == schema {
+		t.Fatal("rpm_limit not found in the schema")
+	}
+	db, errOpen := sql.Open("sqlite", path)
+	if errOpen != nil {
+		t.Fatal(errOpen)
+	}
+	if _, errExec := db.Exec(old + "INSERT INTO keys (scope, name, token_limit) VALUES ('" + callerScope(testKey) + "', 'alice', 7);"); errExec != nil {
+		t.Fatal(errExec)
+	}
+	_ = db.Close()
+	s := &keyStore{keys: map[string]*keyEntry{}}
+	if errOpen = s.open(path); errOpen != nil {
+		t.Fatal(errOpen)
+	}
+	defer s.close()
+	if e := s.keys[callerScope(testKey)]; e == nil || e.Name != "alice" || e.TokenLimit != 7 || e.RPMLimit != 0 {
+		t.Fatalf("migrated entry: %+v", e)
+	}
+	if errSave := s.save(callerScope(testKey), "", "alice", 0, 7, 30, nil, time.Now()); errSave != nil {
+		t.Fatal(errSave)
 	}
 }
 
@@ -252,7 +338,7 @@ func TestModelRules(t *testing.T) {
 	now := time.Now()
 	s := &keyStore{keys: map[string]*keyEntry{}}
 	id := callerScope(testKey)
-	if errSave := s.save(id, "", "", 0, 0, []string{"gpt-5*", "claude-sonnet-*"}, now); errSave != nil {
+	if errSave := s.save(id, "", "", 0, 0, 0, []string{"gpt-5*", "claude-sonnet-*"}, now); errSave != nil {
 		t.Fatal(errSave)
 	}
 	for _, tc := range []struct {

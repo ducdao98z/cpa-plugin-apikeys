@@ -44,6 +44,7 @@ type keySummary struct {
 	CreatedAt     int64    `json:"created_at,omitempty"`
 	ExpiresAt     int64    `json:"expires_at,omitempty"`
 	TokenLimit    int64    `json:"token_limit,omitempty"`
+	RPMLimit      int64    `json:"rpm_limit,omitempty"`
 	AllowedModels []string `json:"allowed_models,omitempty"`
 	Usage         counters `json:"usage"`
 	LastUsed      int64    `json:"last_used,omitempty"`
@@ -56,6 +57,7 @@ type keyRequest struct {
 	Name          string   `json:"name"`
 	ExpiresAt     int64    `json:"expires_at"`
 	TokenLimit    int64    `json:"token_limit"`
+	RPMLimit      int64    `json:"rpm_limit"`
 	AllowedModels []string `json:"allowed_models"` // model patterns, empty = all
 }
 
@@ -64,11 +66,11 @@ func managementRegistration() map[string]any {
 		"routes": []managementRoute{
 			{Method: http.MethodGet, Path: apiBase, Description: "Limits and usage totals of every known client API key, by caller scope id."},
 			{Method: http.MethodGet, Path: apiBase + "/detail", Description: "One key with its usage by model, hourly usage (31 days) and recent requests (?id)."},
-			{Method: http.MethodPost, Path: apiBase + "/save", Description: "Create or update a key's name, expiry (unix ms), token limit and allowed models (* patterns); usage is kept."},
+			{Method: http.MethodPost, Path: apiBase + "/save", Description: "Create or update a key's name, expiry (unix ms), token limit, requests per minute and allowed models (* patterns); usage is kept."},
 			{Method: http.MethodPost, Path: apiBase + "/delete", Description: "Forget a key's limits and usage."},
 			{Method: http.MethodPost, Path: apiBase + "/reset", Description: "Zero a key's usage, which restarts its token limit."},
 		},
-		"resources": []resourceRoute{{Path: "/ui", Menu: displayName, Description: "Add, edit and delete client API keys, with expiry dates, token limits and usage."}},
+		"resources": []resourceRoute{{Path: "/ui", Menu: displayName, Description: "Add, edit and delete client API keys, with expiry dates, token and RPM limits, and usage."}},
 	}
 }
 
@@ -86,7 +88,7 @@ func handleManagement(req pluginapi.ManagementRequest, now time.Time) pluginapi.
 		store.mu.RLock()
 		keys := make(map[string]keySummary, len(store.keys))
 		for id, e := range store.keys {
-			keys[id] = keySummary{Masked: e.Masked, Name: e.Name, CreatedAt: e.CreatedAt, ExpiresAt: e.ExpiresAt, TokenLimit: e.TokenLimit,
+			keys[id] = keySummary{Masked: e.Masked, Name: e.Name, CreatedAt: e.CreatedAt, ExpiresAt: e.ExpiresAt, TokenLimit: e.TokenLimit, RPMLimit: e.RPMLimit,
 				AllowedModels: e.AllowedModels, Usage: e.Usage, LastUsed: e.LastUsed, Status: e.status(now)}
 		}
 		store.mu.RUnlock()
@@ -114,7 +116,7 @@ func handleManagement(req pluginapi.ManagementRequest, now time.Time) pluginapi.
 		var errApply error
 		switch {
 		case strings.HasSuffix(reqPath, "/save"):
-			errApply = store.save(body.ID, body.Masked, body.Name, body.ExpiresAt, body.TokenLimit, body.AllowedModels, now)
+			errApply = store.save(body.ID, body.Masked, body.Name, body.ExpiresAt, body.TokenLimit, body.RPMLimit, body.AllowedModels, now)
 		case strings.HasSuffix(reqPath, "/delete"):
 			errApply = store.remove(body.ID)
 		default:
@@ -140,8 +142,8 @@ func validate(r *keyRequest) string {
 		return "name is too long"
 	case len(r.Masked) > 32:
 		return "masked key is too long"
-	case r.ExpiresAt < 0 || r.TokenLimit < 0:
-		return "expires_at and token_limit must not be negative"
+	case r.ExpiresAt < 0 || r.TokenLimit < 0 || r.RPMLimit < 0:
+		return "expires_at, token_limit and rpm_limit must not be negative"
 	}
 	var ok bool
 	if r.AllowedModels, ok = patterns(r.AllowedModels); !ok {
