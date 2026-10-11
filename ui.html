@@ -682,7 +682,7 @@ function render() {
   renderTable(list);
 }
 function renderTable(list) {
-  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["RPM", "r"], ["Models"], ["Requests", "r"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
+  const head = h("thead", {}, h("tr", {}, [["Name"], ["Status"], ["Expires"], ["Token usage"], ["RPM"], ["Models"], ["Requests", "r"], [""]].map(([t, c]) => h("th", { class: c || "" }, t))));
   const empty = text => ui.table.replaceChildren(h("table", { class: "table" }, head, h("tbody", {}, h("tr", {}, td(text, "empty", { colspan: 8 })))));
   if (!state.loaded) return empty("Loading keys…");
   if (state.error && !list.length) return empty("Could not load keys: " + state.error);
@@ -697,7 +697,7 @@ function renderTable(list) {
       td(h("span", { class: "pill " + tone }, label)),
       td(e && e.expires_at ? [dateFmt.format(e.expires_at), h("span", { class: "sub" }, relative(e.expires_at, state.now))] : h("span", { class: "muted" }, "Never")),
       td(usageCell(e)),
-      td(e && e.rpm_limit ? fmt(e.rpm_limit) : h("span", { class: "muted" }, "—"), "r num"),
+      td(e && e.rpm_limit ? fmt(e.rpm_limit) : h("span", { class: "muted" }, "—"), "num"),
       td(modelsCell(e)),
       td([fmt(e ? e.usage.requests : 0), h("span", { class: "sub" }, fmtTime(e && e.last_used))], "r num"),
       td(h("div", { class: "actions" },
